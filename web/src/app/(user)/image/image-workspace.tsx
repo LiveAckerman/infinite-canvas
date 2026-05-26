@@ -748,12 +748,26 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
                     value={prompt}
                     onChange={(event) => setPrompt(event.target.value)}
                     onPaste={handlePromptPaste}
+                    onKeyDown={(event) => {
+                      // 回车直接触发「开始生成」，Shift+Enter 走默认换行。
+                      // 注意：中文输入法候选阶段也会触发 keydown，nativeEvent.isComposing
+                      // 为 true 时必须放行，否则会把"敲回车确认候选词"误判成提交。
+                      // Ctrl/Meta/Alt 组合也跳过，避免覆盖系统级快捷键。
+                      if (event.key !== "Enter" || event.shiftKey) return;
+                      if (event.nativeEvent.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
+                      event.preventDefault();
+                      if (!canGenerate || running) return;
+                      void generate();
+                    }}
                     onDragOver={handleDragOver}
                     onDragLeave={handleDragLeave}
                     onDrop={handleDropFiles}
                     rows={7}
-                    placeholder="描述画面主体、风格、构图、光线和用途；也可在这里粘贴或拖入图片直接作为参考图"
+                    placeholder="描述画面主体、风格、构图、光线和用途；也可在这里粘贴或拖入图片直接作为参考图。Enter 直接生成，Shift+Enter 换行"
                   />
+                  <div className="mt-1 text-xs text-stone-500 dark:text-stone-400">
+                    按 Enter 直接开始生成，Shift + Enter 换行
+                  </div>
                   <PromptImproveBar
                     className="mt-2"
                     getPrompt={() => prompt}
