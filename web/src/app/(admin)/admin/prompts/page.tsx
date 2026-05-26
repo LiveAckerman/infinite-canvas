@@ -1,8 +1,8 @@
 "use client";
 
-import { CopyOutlined, DeleteOutlined, EditOutlined, ExportOutlined, EyeOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from "@ant-design/icons";
+import { CheckCircleOutlined, CloseCircleOutlined, CopyOutlined, DeleteOutlined, EditOutlined, ExportOutlined, EyeOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from "@ant-design/icons";
 import { ProTable, type ProColumns } from "@ant-design/pro-components";
-import { App, Button, Card, Col, Flex, Form, Image, Input, Modal, Row, Select, Space, Table, Tag, Tooltip, Typography } from "antd";
+import { App, Badge, Button, Card, Col, Flex, Form, Image, Input, Modal, Row, Segmented, Select, Space, Table, Tag, Tooltip, Typography } from "antd";
 import { useEffect, useState } from "react";
 import copy from "copy-to-clipboard";
 
@@ -10,7 +10,7 @@ import type { Prompt } from "@/services/api/prompts";
 import { useAdminPrompts } from "../hooks/use-admin-prompts";
 
 export default function AdminPromptsPage() {
-  const { categories, prompts, tags, keyword, category, tag, page, pageSize, total, isLoading, isSyncing, searchPrompts, changeCategory, changeTag, changePage, changePageSize, resetFilters, refreshPrompts, syncCategory, savePrompt: saveAdminPrompt, deletePrompt } = useAdminPrompts();
+  const { categories, prompts, tags, keyword, category, tag, visibility, page, pageSize, total, pendingCount, isLoading, isSyncing, searchPrompts, changeCategory, changeTag, changeVisibility, changePage, changePageSize, resetFilters, refreshPrompts, syncCategory, savePrompt: saveAdminPrompt, deletePrompt, reviewPrompt } = useAdminPrompts();
   const { message } = App.useApp();
   const [form] = Form.useForm<Partial<Prompt> & { tagText?: string }>();
   const [editingPrompt, setEditingPrompt] = useState<Partial<Prompt> | null>(null);
@@ -63,23 +63,60 @@ export default function AdminPromptsPage() {
       render: (_, item) => <Space size={[4, 4]} wrap>{(item.tags || []).slice(0, 3).map((tag) => <Tag key={tag}>{tag}</Tag>)}</Space>,
     },
     {
+      title: "状态",
+      dataIndex: "visibility",
+      width: 110,
+      render: (_, item) => {
+        const v = item.visibility || "public";
+        if (v === "pending") return <Tag color="gold">待审核</Tag>;
+        if (v === "rejected") return <Tag color="red">已拒绝</Tag>;
+        return <Tag color="green">已公开</Tag>;
+      },
+    },
+    {
       title: "操作",
       key: "actions",
-      width: 112,
+      width: 200,
       align: "right",
-      render: (_, item) => (
-        <Space size={4}>
-          <Tooltip title="详情"><Button type="text" size="small" icon={<EyeOutlined />} onClick={() => setDetailPrompt(item)} /></Tooltip>
-          <Tooltip title="编辑"><Button type="text" size="small" icon={<EditOutlined />} onClick={() => setEditingPrompt(item)} /></Tooltip>
-          <Tooltip title="删除"><Button danger type="text" size="small" icon={<DeleteOutlined />} onClick={() => setDeletingPrompt(item)} /></Tooltip>
-        </Space>
-      ),
+      render: (_, item) => {
+        const isPending = item.visibility === "pending";
+        return (
+          <Space size={4}>
+            {isPending ? (
+              <>
+                <Tooltip title="通过"><Button type="text" size="small" icon={<CheckCircleOutlined style={{ color: "#16a34a" }} />} onClick={() => void reviewPrompt(item.id, true)} /></Tooltip>
+                <Tooltip title="拒绝"><Button type="text" size="small" icon={<CloseCircleOutlined style={{ color: "#dc2626" }} />} onClick={() => void reviewPrompt(item.id, false)} /></Tooltip>
+              </>
+            ) : null}
+            <Tooltip title="详情"><Button type="text" size="small" icon={<EyeOutlined />} onClick={() => setDetailPrompt(item)} /></Tooltip>
+            <Tooltip title="编辑"><Button type="text" size="small" icon={<EditOutlined />} onClick={() => setEditingPrompt(item)} /></Tooltip>
+            <Tooltip title="删除"><Button danger type="text" size="small" icon={<DeleteOutlined />} onClick={() => setDeletingPrompt(item)} /></Tooltip>
+          </Space>
+        );
+      },
     },
   ];
 
   return (
     <main style={{ padding: 24 }}>
       <Flex vertical gap={16}>
+        <Segmented
+          value={visibility || "all"}
+          onChange={(value) => changeVisibility(value === "all" ? "" : (value as string))}
+          options={[
+            { label: "全部", value: "all" },
+            {
+              label: (
+                <span>
+                  待审核 <Badge count={pendingCount} size="small" style={{ backgroundColor: pendingCount ? "#dc2626" : undefined }} />
+                </span>
+              ),
+              value: "pending",
+            },
+            { label: "已公开", value: "public" },
+            { label: "已拒绝", value: "rejected" },
+          ]}
+        />
         <Card variant="borderless">
           <Form layout="vertical">
             <Row gutter={16} align="bottom">

@@ -75,6 +75,15 @@ func ListPromptTags(q model.Query) ([]string, error) {
 	return promptTagsFromItems(items), nil
 }
 
+// GetPromptByID 按 id 查询单条提示词，未找到返回 ok=false。
+func GetPromptByID(id string) (model.Prompt, bool, error) {
+	db, err := DB()
+	if err != nil {
+		return model.Prompt{}, false, err
+	}
+	return findPrompt(db, id)
+}
+
 // SavePrompt 保存提示词，并在更新时保留原创建时间。
 func SavePrompt(item model.Prompt) (model.Prompt, error) {
 	db, err := DB()
@@ -128,6 +137,14 @@ func applyPromptFilters(tx *gorm.DB, q model.Query) *gorm.DB {
 	}
 	if isActivePromptOption(q.Category) {
 		tx = tx.Where("category = ?", q.Category)
+	}
+	if q.Visibility != "" {
+		// 支持 "public-only"：前台公开列表用来要求 visibility 为 public 或 空（兼容历史无 visibility 的旧数据）
+		if q.Visibility == "public-only" {
+			tx = tx.Where("visibility = ? OR visibility = ?", model.PromptVisibilityPublic, "")
+		} else {
+			tx = tx.Where("visibility = ?", q.Visibility)
+		}
 	}
 	return applyPromptTagsFilter(tx, q.Tags)
 }

@@ -6,6 +6,7 @@ import { Button, InputNumber } from "antd";
 
 import { defaultConfig, type AiConfig } from "@/lib/ai-config";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { PromptImproveBar } from "@/components/prompt-improve-panel";
 import { useAiConfigStore } from "@/stores/use-ai-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasPromptLibrary } from "./canvas-prompt-library";
@@ -69,6 +70,13 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         placeholder={mode === "image" ? hasImageContent ? "请输入你想要把这张图修改成什么" : "描述要生成的图片内容" : hasTextContent ? "请输入你想要将本段文本修改成什么" : "请输入你想要生成的文本内容"}
       />
 
+      <PromptImproveBar
+        className="mt-2"
+        getPrompt={() => prompt}
+        onAccept={updatePrompt}
+        disabled={isRunning}
+      />
+
       <div className="mt-2 flex min-w-0 items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <CanvasPromptLibrary onSelect={updatePrompt} />
@@ -98,9 +106,12 @@ function defaultMode(type: CanvasNodeData["type"]): CanvasNodeGenerationMode {
 }
 
 function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: CanvasNodeGenerationMode): AiConfig {
+  void mode;
   return {
     quality: globalConfig.quality || defaultConfig.quality,
     size: node.metadata?.size || globalConfig.size || defaultConfig.size,
-    count: String(node.metadata?.count || (mode === "image" ? 3 : globalConfig.count) || defaultConfig.count),
+    // count 不走 globalConfig：新建图片/配置节点统一从 defaultConfig.count（1）起步，
+    // 避免 /image 工作台偏好被同步到画布让人困惑。已有节点 metadata 优先。
+    count: String(node.metadata?.count || defaultConfig.count),
   };
 }

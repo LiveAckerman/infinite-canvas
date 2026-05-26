@@ -39,7 +39,10 @@ type Generation struct {
 	RequestParams map[string]any `json:"requestParams" gorm:"serializer:json"`
 	// 最近一次成功反代调用的上游响应 raw JSON 字符串，已去掉 b64_json 大字段，仅保留元信息（status、data[].url、data[].revised_prompt 等）。
 	UpstreamMeta string `json:"upstreamMeta"`
-	CreatedAt    string `json:"createdAt"`
+	// ParentID 指向被微调的源 generation.id；为空表示是原始生成。可用于 /image/{id} 详情
+	// 页面追溯「从哪张图微调出来的」以及统计 children。
+	ParentID  string `json:"parentId" gorm:"index"`
+	CreatedAt string `json:"createdAt"`
 }
 
 // GenerationList 生图历史分页结果。

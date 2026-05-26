@@ -17,6 +17,7 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { useUserStore } from "@/stores/use-user-store";
 import type { ReferenceImage } from "@/types/image";
 import { DiaTextReveal } from "@/components/ui/dia-text-reveal";
+import { PromptImproveBar } from "@/components/prompt-improve-panel";
 import { CanvasPromptLibrary } from "./canvas-prompt-library";
 import { CanvasNodeType, type CanvasAssistantImage, type CanvasAssistantMessage, type CanvasAssistantReference, type CanvasAssistantSession, type CanvasNodeData } from "../types";
 
@@ -428,6 +429,12 @@ function AssistantComposer({
           className="thin-scrollbar h-20 w-full resize-none border-0 bg-transparent px-1 py-1 text-sm leading-5 outline-none placeholder:text-stone-400"
           style={{ color: theme.node.text }}
           placeholder={mode === "image" ? "描述你想生成或修改的图片，支持粘贴 / 拖拽 / 上传图片作为参考" : "输入你想问的问题"}
+        />
+        <PromptImproveBar
+          className="mt-1"
+          getPrompt={() => prompt}
+          onAccept={onPromptChange}
+          disabled={isRunning}
         />
         <div className="mt-2 flex items-center justify-between gap-2">
           <div className="flex min-w-0 flex-1 items-center gap-1.5">

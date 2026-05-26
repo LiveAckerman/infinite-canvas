@@ -22,6 +22,8 @@ export type AdminPromptQuery = {
   keyword?: string;
   category?: string;
   tag?: string[];
+  // public-only / public / pending / rejected
+  visibility?: string;
   page?: number;
   pageSize?: number;
 };

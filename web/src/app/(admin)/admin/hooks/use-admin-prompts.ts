@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { App } from "antd";
 
 import { deleteAdminPrompt, fetchAdminPrompts, fetchAdminPromptCategories, saveAdminPrompt, syncAdminPromptCategory, type AdminPromptCategory } from "@/services/api/admin";
-import type { Prompt } from "@/services/api/prompts";
+import { reviewPrompt, type Prompt } from "@/services/api/prompts";
 import { useUserStore } from "@/stores/use-user-store";
 
 const defaultPageSize = 10;
@@ -18,6 +18,8 @@ export function useAdminPrompts() {
   const [keyword, setKeyword] = useState("");
   const [category, setCategory] = useState("");
   const [tag, setTag] = useState<string[]>([]);
+  // 审核状态筛选：空 = 全部；"pending"/"public"/"rejected" 分别对应 Tab
+  const [visibility, setVisibility] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(defaultPageSize);
 
@@ -29,8 +31,16 @@ export function useAdminPrompts() {
   });
 
   const promptsQuery = useQuery({
-    queryKey: ["admin", "prompts", token, keyword, category, tag, page, pageSize],
-    queryFn: () => fetchAdminPrompts(token, { keyword, category, tag, page, pageSize }),
+    queryKey: ["admin", "prompts", token, keyword, category, tag, visibility, page, pageSize],
+    queryFn: () => fetchAdminPrompts(token, { keyword, category, tag, visibility, page, pageSize }),
+    enabled: Boolean(token),
+    retry: false,
+  });
+
+  // 单独再拉一次只查 pending 的 total，用来给 Tab 上挂红点 badge（不分页，pageSize=1 够用）。
+  const pendingCountQuery = useQuery({
+    queryKey: ["admin", "prompts-pending-count", token],
+    queryFn: () => fetchAdminPrompts(token, { visibility: "pending", pageSize: 1 }),
     enabled: Boolean(token),
     retry: false,
   });
@@ -71,6 +81,18 @@ export function useAdminPrompts() {
     },
   });
 
+  const reviewMutation = useMutation({
+    mutationFn: ({ id, approve }: { id: string; approve: boolean }) => reviewPrompt(token, id, approve),
+    onSuccess: async (_, { approve }) => {
+      await queryClient.invalidateQueries({ queryKey: ["admin", "prompts"] });
+      await queryClient.invalidateQueries({ queryKey: ["admin", "prompts-pending-count"] });
+      message.success(approve ? "已通过，提示词已公开" : "已拒绝");
+    },
+    onError: (error) => {
+      message.error(error instanceof Error ? error.message : "操作失败");
+    },
+  });
+
   useEffect(() => {
     if (categoriesQuery.isError) {
       const errorMessage = categoriesQuery.error instanceof Error ? categoriesQuery.error.message : "读取提示词分类失败";
@@ -91,14 +113,15 @@ export function useAdminPrompts() {
     }
   }, [clearSession, message, promptsQuery.error, promptsQuery.isError]);
 
-  const updateFilters = (next: Partial<{ keyword: string; category: string; tag: string[]; page: number; pageSize: number }>) => {
-    const queryState = { keyword, category, tag, page, pageSize, ...next };
-    if (next.keyword !== undefined || next.category !== undefined || next.tag !== undefined || next.pageSize !== undefined) {
+  const updateFilters = (next: Partial<{ keyword: string; category: string; tag: string[]; visibility: string; page: number; pageSize: number }>) => {
+    const queryState = { keyword, category, tag, visibility, page, pageSize, ...next };
+    if (next.keyword !== undefined || next.category !== undefined || next.tag !== undefined || next.visibility !== undefined || next.pageSize !== undefined) {
       queryState.page = 1;
     }
     setKeyword(queryState.keyword);
     setCategory(queryState.category);
     setTag(queryState.tag);
+    setVisibility(queryState.visibility);
     setPage(queryState.page);
     setPageSize(queryState.pageSize);
   };
@@ -118,20 +141,24 @@ export function useAdminPrompts() {
     keyword,
     category,
     tag,
+    visibility,
     page,
     pageSize,
     total: data?.total || 0,
+    pendingCount: pendingCountQuery.data?.total || 0,
     isLoading,
     isSyncing: syncMutation.isPending,
     syncCategory: (category: string) => syncMutation.mutateAsync(category),
     searchPrompts: (value = keyword) => updateFilters({ keyword: value }),
     changeCategory: (value: string) => updateFilters({ category: value, tag: [] }),
     changeTag: (value: string[]) => updateFilters({ tag: value }),
+    changeVisibility: (value: string) => updateFilters({ visibility: value }),
     changePage: (value: number) => updateFilters({ page: value }),
     changePageSize: (value: number) => updateFilters({ pageSize: value }),
-    resetFilters: () => updateFilters({ keyword: "", category: "", tag: [], page: 1, pageSize: defaultPageSize }),
+    resetFilters: () => updateFilters({ keyword: "", category: "", tag: [], visibility: "", page: 1, pageSize: defaultPageSize }),
     refreshPrompts,
     savePrompt: (prompt: Partial<Prompt>) => saveMutation.mutateAsync(prompt),
     deletePrompt: (id: string) => deleteMutation.mutateAsync(id),
+    reviewPrompt: (id: string, approve: boolean) => reviewMutation.mutateAsync({ id, approve }),
   };
 }

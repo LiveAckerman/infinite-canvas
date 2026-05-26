@@ -1,12 +1,14 @@
 "use client";
 
-import { BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, ImageOff, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
+import { BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, ImageOff, LoaderCircle, PanelLeftClose, PanelLeftOpen, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { App, AutoComplete, Button, Checkbox, Drawer, Empty, Image, Input, InputNumber, Modal, Select, Tag, Typography } from "antd";
 
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
+import { SubmitPromptModal } from "@/components/prompts/submit-prompt-modal";
+import { PromptImproveBar } from "@/components/prompt-improve-panel";
 import { AssetPickerModal, type InsertAssetPayload } from "@/app/(user)/canvas/components/asset-picker-modal";
 import type { AiConfig } from "@/lib/ai-config";
 import { createId } from "@/lib/id";
@@ -72,6 +74,19 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   // 拖拽图片到提示词 / 参考图区域时的视觉高亮，松手或离开时复位
   const [dragHighlight, setDragHighlight] = useState(false);
+  // 「加入提示词库」Modal 开关
+  const [submitPromptOpen, setSubmitPromptOpen] = useState(false);
+  // 左侧"生成记录"面板折叠状态。localStorage 持久化（轻量偏好不上云），
+  // 初始 false（展开）；移动端走 Drawer 不受这个 state 影响。
+  const LEFT_PANEL_COLLAPSED_KEY = "infinite-canvas:image-log-panel-collapsed";
+  const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(LEFT_PANEL_COLLAPSED_KEY) === "1";
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(LEFT_PANEL_COLLAPSED_KEY, leftPanelCollapsed ? "1" : "0");
+  }, [leftPanelCollapsed]);
   const autoPreviewedIdRef = useRef<string | null>(null);
   // 用 ref 跟踪 generate() 是否还在跑：useEffect/previewGenerationLog 的 closure
   // 可能拿到 stale 的 running state（先于 setRunning(true) commit 触发），
@@ -80,6 +95,9 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
   // 占位是自己发的，避免被刷成"被中断"。
   const isGeneratingRef = useRef(false);
   const activeGenerationIdRef = useRef<string | null>(null);
+  // 用户点了某张图的「微调」按钮后，把当时的 previewLog.id 暂存在这里，
+  // 下一次 generate() 写库时把它作为 parentId 串到新记录上。用完即焚。
+  const pendingParentIdRef = useRef<string | null>(null);
 
   const canGenerate = Boolean(prompt.trim());
   const generationCount = Math.max(1, Math.min(10, Number(config.count) || 1));
@@ -260,6 +278,10 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
       quality: qualityValue,
       referenceCount: snapshot.references.length,
     };
+    // 抓取并立刻清空"微调来源"标记：本次 generate 用完之后不再续。
+    // 如果用户点了某张图的微调按钮，pendingParentIdRef 会指向那条 record id。
+    const parentId = pendingParentIdRef.current || undefined;
+    pendingParentIdRef.current = null;
 
     // 第一阶段：点击「开始生成」就立刻入库一条 status=running 占位记录。
     // 这样即使浏览器关掉、网络抖动、所有 task 失败，用户也能在历史里看到这次调用，
@@ -282,6 +304,7 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
         errors: [],
         requestParams,
         upstreamMeta: "",
+        parentId,
       });
     } catch {
       // mutation onError 已弹 message；首阶段都没入库，干脆中止避免空转。
@@ -329,6 +352,7 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
         errors,
         requestParams,
         upstreamMeta,
+        parentId,
       });
       setPreviewLog(saved);
       successCount ? message.success("图片已生成") : message.error(failed?.reason instanceof Error ? failed.reason.message : "生成失败");
@@ -351,6 +375,40 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
     const stored = await uploadWithToast(image.dataUrl, { label: "参考图" });
     setReferences((value) => [...value, { id: createId(), name: `result-${index + 1}.png`, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }]);
     message.success("已加入参考图");
+  };
+
+  // 用户点某张结果图的「微调」：把它加入参考图，并预置提示词前缀；
+  // 同时把当前记录 id 暂存到 pendingParentIdRef，generate() 写库时会带 parentId。
+  // 微调本质是「在这条记录基础上发起新一次图生图」，新记录通过 parentId 串回父记录。
+  const refineResult = (image: GeneratedImage) => {
+    if (running) {
+      message.error("当前正在生成，请稍后再操作");
+      return;
+    }
+    if (!image.storageKey) {
+      message.error("这张图还没保存到服务器，无法微调");
+      return;
+    }
+    setReferences((value) => {
+      if (value.some((ref) => ref.storageKey === image.storageKey)) return value;
+      return [
+        ...value,
+        {
+          id: createId(),
+          name: `refine-${Date.now()}.png`,
+          type: "image/png",
+          dataUrl: image.dataUrl,
+          storageKey: image.storageKey,
+        },
+      ];
+    });
+    setPrompt((current) => {
+      const prefix = "在这张图基础上：";
+      if (current.trim()) return current;
+      return prefix;
+    });
+    pendingParentIdRef.current = previewLog?.id || null;
+    message.info("已加入参考图，请描述修改方向后点开始生成");
   };
 
   const saveResultToAssets = async (image: GeneratedImage, index: number) => {
@@ -395,6 +453,9 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
     setPreviewLog(null);
     autoPreviewedIdRef.current = null;
     activeGenerationIdRef.current = null;
+    // 点「新建」明确语义是「开始新的一次」，把生成次数回归默认 1，
+    // 避免上一次跑了 N 张的偏好继续生效。同步推到服务器是预期行为。
+    updateConfig("count", "1");
     router.replace("/image");
   };
 
@@ -634,9 +695,30 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
-      <main className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[300px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)]">
-        <aside className="thin-scrollbar hidden min-h-0 overflow-y-auto rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:block">
-          <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={(log) => void previewGenerationLog(log)} />
+      <main className={`grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:overflow-hidden ${leftPanelCollapsed ? "lg:grid-cols-[44px_minmax(0,1fr)]" : "lg:grid-cols-[300px_minmax(0,1fr)] xl:grid-cols-[320px_minmax(0,1fr)]"}`}>
+        <aside className={`thin-scrollbar hidden min-h-0 overflow-y-auto rounded-lg border border-stone-200 bg-card shadow-sm dark:border-stone-800 lg:flex lg:flex-col ${leftPanelCollapsed ? "items-center p-2" : "p-4"}`}>
+          {leftPanelCollapsed ? (
+            <button
+              type="button"
+              className="grid size-8 place-items-center rounded-md text-stone-500 transition hover:bg-stone-100 hover:text-stone-900 dark:hover:bg-stone-800 dark:hover:text-stone-100"
+              onClick={() => setLeftPanelCollapsed(false)}
+              title="展开生成记录"
+              aria-label="展开生成记录"
+            >
+              <PanelLeftOpen className="size-4" />
+            </button>
+          ) : (
+            <LogPanel
+              logs={logs}
+              selectedLogIds={selectedLogIds}
+              activeLogId={previewLog?.id}
+              onSelectedLogIdsChange={setSelectedLogIds}
+              onCreateSession={createSession}
+              onDeleteSelected={() => setDeleteConfirmOpen(true)}
+              onPreviewLog={(log) => void previewGenerationLog(log)}
+              onCollapse={() => setLeftPanelCollapsed(true)}
+            />
+          )}
         </aside>
 
         <section className="grid gap-3 lg:min-h-0 lg:overflow-hidden xl:grid-cols-[420px_minmax(0,1fr)]">
@@ -671,6 +753,12 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
                     onDrop={handleDropFiles}
                     rows={7}
                     placeholder="描述画面主体、风格、构图、光线和用途；也可在这里粘贴或拖入图片直接作为参考图"
+                  />
+                  <PromptImproveBar
+                    className="mt-2"
+                    getPrompt={() => prompt}
+                    onAccept={setPrompt}
+                    disabled={running}
                   />
                 </div>
 
@@ -727,16 +815,24 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
 
           <div className="thin-scrollbar rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:min-h-0 lg:overflow-y-auto lg:p-5">
               <div className="mb-4 flex items-center justify-between gap-3">
-                <div>
+                <div className="flex items-center gap-3">
                   <h2 className="text-xl font-semibold">生成结果</h2>
+                  {previewLog?.parentId ? (
+                    <Button size="small" type="link" className="!h-7 !px-2" onClick={() => router.push(`/image/${previewLog.parentId}`)} icon={<Sparkles className="size-3.5" />}>来自微调</Button>
+                  ) : null}
                 </div>
-                {running ? <Tag className="m-0 px-2 py-1">等待 {formatDuration(elapsedMs)}</Tag> : null}
+                <div className="flex items-center gap-2">
+                  {previewLog && previewLog.thumbnails.length > 0 ? (
+                    <Button size="small" icon={<BookOpen className="size-3.5" />} onClick={() => setSubmitPromptOpen(true)}>加入提示词库</Button>
+                  ) : null}
+                  {running ? <Tag className="m-0 px-2 py-1">等待 {formatDuration(elapsedMs)}</Tag> : null}
+                </div>
               </div>
               {results.length ? (
                 <div className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-3">
                   {results.map((result, index) => (
                     result.status === "success" && result.image ? (
-                      <ResultImageCard key={result.id} image={result.image} index={index} onEdit={addResultToReferences} onDownload={downloadImage} onSaveAsset={saveResultToAssets} />
+                      <ResultImageCard key={result.id} image={result.image} index={index} onEdit={addResultToReferences} onDownload={downloadImage} onSaveAsset={saveResultToAssets} onRefine={previewLog ? refineResult : undefined} />
                     ) : result.status === "missing" ? (
                       <MissingImageCard key={result.id} />
                     ) : result.status === "failed" ? (
@@ -768,6 +864,12 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
         </div>
       </Drawer>
       <PromptSelectDialog open={promptDialogOpen} onOpenChange={setPromptDialogOpen} onSelect={setPrompt} />
+      <SubmitPromptModal
+        open={submitPromptOpen}
+        onClose={() => setSubmitPromptOpen(false)}
+        defaultPrompt={previewLog?.prompt || prompt}
+        imageOptions={previewLog?.thumbnails || []}
+      />
       <AssetPickerModal open={assetPickerOpen} defaultTab="my-assets" onInsert={(payload) => void insertPickedAsset(payload)} onClose={() => setAssetPickerOpen(false)} />
       <Modal title="删除生成记录" open={deleteConfirmOpen} onCancel={() => setDeleteConfirmOpen(false)} onOk={() => void deleteSelectedLogs()} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
         确定删除选中的 {selectedLogIds.length} 条生成记录吗？
@@ -795,7 +897,7 @@ function GenerationSettings({ config, updateConfig }: { config: AiConfig; update
   );
 }
 
-function ResultImageCard({ image, index, onEdit, onDownload, onSaveAsset }: { image: GeneratedImage; index: number; onEdit: (image: GeneratedImage, index: number) => void; onDownload: (image: GeneratedImage, index: number) => void; onSaveAsset: (image: GeneratedImage, index: number) => void }) {
+function ResultImageCard({ image, index, onEdit, onDownload, onSaveAsset, onRefine }: { image: GeneratedImage; index: number; onEdit: (image: GeneratedImage, index: number) => void; onDownload: (image: GeneratedImage, index: number) => void; onSaveAsset: (image: GeneratedImage, index: number) => void; onRefine?: (image: GeneratedImage) => void }) {
   return (
     <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
       <Image src={image.dataUrl} alt={`生成结果 ${index + 1}`} className="aspect-square object-cover" />
@@ -806,6 +908,7 @@ function ResultImageCard({ image, index, onEdit, onDownload, onSaveAsset }: { im
           {image.durationMs ? <span>{formatDuration(image.durationMs)}</span> : null}
         </div>
         <div className="flex shrink-0 gap-1">
+          {onRefine ? <Button size="small" type="primary" icon={<Sparkles className="size-3.5" />} onClick={() => onRefine(image)}>AI 微调</Button> : null}
           <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => void onSaveAsset(image, index)}>添加到素材</Button>
           <Button size="small" icon={<PenLine className="size-3.5" />} onClick={() => void onEdit(image, index)}>加入参考图</Button>
           <Button size="small" icon={<Download className="size-3.5" />} onClick={() => onDownload(image, index)}>下载</Button>
@@ -868,17 +971,28 @@ function updateResultAt(results: GenerationResult[], index: number, next: Partia
   return results.map((item, itemIndex) => itemIndex === index ? { ...item, ...next } : item);
 }
 
-function LogPanel({ logs, selectedLogIds, activeLogId, onSelectedLogIdsChange, onCreateSession, onDeleteSelected, onPreviewLog }: { logs: GenerationRecord[]; selectedLogIds: string[]; activeLogId?: string; onSelectedLogIdsChange: (ids: string[]) => void; onCreateSession: () => void; onDeleteSelected: () => void; onPreviewLog: (log: GenerationRecord) => void }) {
+function LogPanel({ logs, selectedLogIds, activeLogId, onSelectedLogIdsChange, onCreateSession, onDeleteSelected, onPreviewLog, onCollapse }: { logs: GenerationRecord[]; selectedLogIds: string[]; activeLogId?: string; onSelectedLogIdsChange: (ids: string[]) => void; onCreateSession: () => void; onDeleteSelected: () => void; onPreviewLog: (log: GenerationRecord) => void; onCollapse?: () => void }) {
   const allSelected = Boolean(logs.length) && selectedLogIds.length === logs.length;
   const toggleAll = () => onSelectedLogIdsChange(allSelected ? [] : logs.map((log) => log.id));
 
   return (
     <>
       <div className="mb-3 flex items-center justify-between gap-3">
-        <div>
+        <div className="flex items-center gap-2">
           <h2 className="text-base font-semibold">生成记录</h2>
+          <Tag className="m-0">{logs.length}</Tag>
         </div>
-        <Tag className="m-0">{logs.length}</Tag>
+        {onCollapse ? (
+          <button
+            type="button"
+            className="grid size-7 place-items-center rounded-md text-stone-500 transition hover:bg-stone-100 hover:text-stone-900 dark:hover:bg-stone-800 dark:hover:text-stone-100"
+            onClick={onCollapse}
+            title="收起生成记录"
+            aria-label="收起生成记录"
+          >
+            <PanelLeftClose className="size-4" />
+          </button>
+        ) : null}
       </div>
       <div className="mb-4 flex flex-wrap gap-2">
         <Button size="small" icon={<Plus className="size-3.5" />} onClick={onCreateSession}>新建</Button>

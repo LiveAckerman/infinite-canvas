@@ -486,7 +486,8 @@ function InfiniteCanvasPage() {
   }, [message]);
 
   const createConnectedNode = useCallback((type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Config, pending: PendingConnectionCreate) => {
-    const metadata = type === CanvasNodeType.Config ? { size: config.size, count: Number(config.count) || 1 } : undefined;
+    // 新建配置节点固定 count=1，不读全局偏好（避免被 /image 工作台的临时偏好污染）。
+    const metadata = type === CanvasNodeType.Config ? { size: config.size, count: 1 } : undefined;
     const newNode = createCanvasNode(type, pending.position, metadata);
     const connection = normalizeConnection(pending.connection.nodeId, newNode.id, [...nodesRef.current, newNode], pending.connection.handleType);
     if (!connection) {
@@ -599,7 +600,7 @@ function InfiniteCanvasPage() {
       const targetPosition = position || getCanvasCenter();
       const configMetadata = type === CanvasNodeType.Config ? {
         size: config.size,
-        count: Number(config.count) || 1,
+        count: 1, // 新建节点固定 1，不读 config.count 避免被工作台偏好污染
       } : undefined;
       const newNode = createCanvasNode(type, targetPosition, configMetadata);
 
@@ -1739,7 +1740,7 @@ function InfiniteCanvasPage() {
     }, {
       prompt: "",
       size: config.size,
-      count: Number(config.count) || 1,
+      count: 1, // 新建配置节点固定 1
     });
     const connection = { id: createId(), fromNodeId: sourceNode.id, toNodeId: configNode.id };
     const nextNodes = nodesRef.current.map((item) => item.id === sourceNode.id ? { ...item, metadata: { ...item.metadata, content: prompt, prompt, status: NODE_STATUS_SUCCESS } } : item).concat(configNode);
@@ -2433,7 +2434,8 @@ function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | undefine
   return {
     quality: config.quality || defaultConfig.quality,
     size: node?.metadata?.size || config.size || defaultConfig.size,
-    count: String(node?.metadata?.count || config.count || defaultConfig.count),
+    // count 只看节点 metadata，不走工作台全局偏好，与新建节点逻辑保持一致。
+    count: String(node?.metadata?.count || defaultConfig.count),
   };
 }
 

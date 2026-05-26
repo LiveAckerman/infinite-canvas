@@ -24,6 +24,8 @@ export type GenerationRecord = {
   requestParams?: Record<string, unknown>;
   // 最近一次反代上游响应 raw JSON 字符串（去掉 b64_json 后），仅供 admin 审计
   upstreamMeta?: string;
+  // 微调来源：指向被微调的源 generation.id；为空表示原始生成
+  parentId?: string;
   createdAt: string;
 };
 
@@ -54,6 +56,7 @@ export type SaveGenerationPayload = {
   errors?: string[];
   requestParams?: Record<string, unknown>;
   upstreamMeta?: string;
+  parentId?: string;
 };
 
 export async function fetchGenerations(token: string, query: GenerationQuery = {}) {

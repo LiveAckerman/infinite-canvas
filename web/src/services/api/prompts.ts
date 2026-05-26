@@ -1,4 +1,6 @@
-import { apiGet, compactApiParams } from "@/services/api/request";
+import { apiGet, apiPost, compactApiParams } from "@/services/api/request";
+
+export type PromptVisibility = "public" | "pending" | "rejected" | "";
 
 export type Prompt = {
   id: string;
@@ -9,9 +11,28 @@ export type Prompt = {
   category: string;
   githubUrl: string;
   preview: string;
+  visibility: PromptVisibility;
+  submitterId: string;
   createdAt: string;
   updatedAt: string;
 };
+
+export type SubmitPromptPayload = {
+  title: string;
+  prompt: string;
+  category?: string;
+  tags: string[];
+  coverImageId: string;
+};
+
+export async function submitPrompt(token: string, payload: SubmitPromptPayload) {
+  return apiPost<Prompt>("/api/prompts/submit", payload, token);
+}
+
+// admin 端审核
+export async function reviewPrompt(token: string, id: string, approve: boolean) {
+  return apiPost<boolean>(`/api/admin/prompts/${encodeURIComponent(id)}/review`, { approve }, token);
+}
 
 export const ALL_PROMPTS_OPTION = "全部";
 

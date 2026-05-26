@@ -31,7 +31,9 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, inputs, o
   const globalConfig = useAiConfigStore((state) => state.config);
   const theme = canvasThemes[useThemeStore((state) => state.theme)];
   const mode = node.metadata?.generationMode || "image";
-  const fallbackCount = Number(globalConfig.count) || Number(defaultConfig.count) || 1;
+  void globalConfig;
+  // count 只看节点 metadata，不走全局偏好，避免 /image 工作台调整后画布新建节点跟着变。
+  const fallbackCount = Number(defaultConfig.count) || 1;
   const count = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(node.metadata?.count) || fallbackCount) || 1)));
   const chipStyle = { background: theme.node.fill, borderColor: theme.node.stroke, color: theme.node.text };
   const textInputs = inputs.filter((input) => input.type === "text");

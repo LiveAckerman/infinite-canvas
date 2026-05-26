@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## v0.0.17 - 2026-05-22
+
++ [新增] **加入提示词库**：`/image/{id}` 详情页"生成结果"标题旁新增「加入提示词库」按钮（仅在有成功图片时显示）。点击后弹出 Modal：必填标题（≤30 字）、从该记录成功的缩略图里选 1 张作为效果图、分类（默认 system）、标签（输入后回车添加；每个 ≤6 字、最多 8 个），提示词内容默认填入 record.prompt 可编辑。提交进 `pending` 审核队列。后端 `model.Prompt` 加 `Visibility`（public/pending/rejected）和 `SubmitterID` 字段，前台 `/prompts` 强制 `visibility=public-only`（兼容历史无 visibility 数据）不会漏出 pending。新增端点：`POST /api/prompts/submit`（普通用户）+ `POST /api/admin/prompts/:id/review`（管理员）。
++ [新增] **管理后台提示词审核 Tab**：`/admin/prompts` 顶部新增 Segmented 切换「全部 / 待审核 / 已公开 / 已拒绝」，待审核 Tab 自带红点 badge 实时显示 pending 数量。表格加「状态」列；待审核行操作区显示绿色「通过」+ 红色「拒绝」按钮，点了立即变更 visibility 并刷新列表 + badge。
++ [新增] **生成结果「AI 微调」**：`/image/{id}` 详情页每张成功结果卡片新增蓝色「AI 微调」主按钮。点击：把该图自动加入参考图列表（用 storageKey 关联，不重复上传）、提示词框预填「在这张图基础上：」、把当前记录 id 暂存到 `pendingParentIdRef`。用户写完修改指令点开始生成时，新记录会带 `parentId` 指向源记录。`model.Generation` 加 `ParentID` 字段（gorm index）；前端 `GenerationRecord.parentId` 同步。从子记录详情页的「生成结果」标题旁会显示「← 来自微调」面包屑链接，点击跳回父记录。
++ [新增] **提示词优化（端到端）**：所有提示词输入框（`/image` 工作台、画布节点 prompt 面板、画布助手输入框）旁新增「✨ AI 优化」按钮，点击调后端 `POST /api/prompts/improve` 反代：服务端在 `service/prompt_improve.go` 硬编码一段「你是图像提示词优化专家…」的 system prompt 注入到 chat completions 请求，调启用配置的 textModel，前端永远拿不到 system prompt 也拿不到 API Key。优化结果**原地预览**（不弹 Modal）：蓝色边框面板里显示优化文本 + 三个按钮「接受并替换 / 重试 / 拒绝」，**只有点接受才覆盖输入框**，拒绝就丢弃。复用 chat 限流（每用户 5/min；admin 跳过）。
++ [新增] **`/image` 左侧生成记录可收起**：panel 顶部新增 PanelLeftClose 按钮，点击收起为 44px 窄柄（只显示 PanelLeftOpen 展开按钮）；状态走 localStorage 持久化（`image-log-panel-collapsed`），不上云。移动端原本就走 Drawer 不受影响。
++ [调整] **新建场景统一回归 count=1，不读偏好**：
+  - `/image` 工作台点「新建」按钮时主动 `updateConfig("count", "1")`，避免上次跑了 N 张的偏好继续生效；
+  - `/canvas` 新建配置节点（3 处入口 createConnectedNode / createNode / generateImageFromTextNode）固定 metadata `count: 1`，不再读 `config.count`；
+  - `buildNodeConfig` 和 `buildGenerationConfig` 的 fallback 跳过 `globalConfig.count`，只看 `node.metadata.count → defaultConfig.count`；
+  - 用户偏好里 `count` 字段不再对画布新建节点起作用，避免「工作台一次性输的张数」被错误地理解成永久偏好。
++ [修复] 画布节点提示词面板（文/图生图节点上方那一栏）新建图片节点时生成次数仍显示 `3`。v0.0.10 自称"清掉了 4 处硬编码"，但 `canvas-node-prompt-panel.tsx:104` 还藏着一处 `(mode === "image" ? 3 : globalConfig.count)` 漏网。现在跟 Config 节点 / 工作台一样统一走 `node.metadata?.count → globalConfig.count → defaultConfig.count`（默认新用户 1），新建节点默认使用账号偏好。已存的旧节点 metadata 里的 3 不变，手动改一次即可。
+
 ## v0.0.16 - 2026-05-22
 
 + [新增] `/image` 生图工作台输入提示词的方式扩展到 4 种（之前只有"点上传按钮 / 点剪切板按钮"两种）：

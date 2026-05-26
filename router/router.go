@@ -50,6 +50,8 @@ func New() *gin.Engine {
 	me.DELETE("/assets/me/:id", func(c *gin.Context) {
 		handler.DeleteMyAsset(c.Writer, c.Request, c.Param("id"))
 	})
+	me.POST("/prompts/improve", gin.WrapF(handler.ImprovePrompt))
+	me.POST("/prompts/submit", gin.WrapF(handler.SubmitPrompt))
 	me.POST("/images", gin.WrapF(handler.UploadImage))
 	me.GET("/images/:id", func(c *gin.Context) {
 		handler.GetImage(c.Writer, c.Request, c.Param("id"))
@@ -70,6 +72,9 @@ func New() *gin.Engine {
 	admin.POST("/prompts", gin.WrapF(handler.AdminSavePrompt))
 	admin.DELETE("/prompts/:id", func(c *gin.Context) {
 		handler.AdminDeletePrompt(c.Writer, c.Request, c.Param("id"))
+	})
+	admin.POST("/prompts/:id/review", func(c *gin.Context) {
+		handler.AdminReviewPrompt(c.Writer, c.Request, c.Param("id"))
 	})
 	admin.GET("/assets", gin.WrapF(handler.AdminAssets))
 	admin.POST("/assets", gin.WrapF(handler.AdminSaveAsset))
