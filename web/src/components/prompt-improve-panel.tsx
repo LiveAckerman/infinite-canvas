@@ -85,7 +85,7 @@ export function PromptImproveBar({ getPrompt, onAccept, className, triggerClassN
           onClick={handleTrigger}
           className={triggerClassName}
         >
-          AI 优化
+          提示词优化
         </Button>
       </div>
 

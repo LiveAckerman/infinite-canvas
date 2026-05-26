@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.0.18 - 2026-05-22
+
++ [调整] 生图结果卡片底部 4 个操作按钮（AI 微调 / 添加到素材 / 加入参考图 / 下载）以前常驻显示，列宽不够时会折两行甚至溢出。现在改成图片上**桌面端 hover 才显示**的浮层（带半透明渐变背景），移动端继续常显；按钮文案缩短为「素材」「参考图」更省位；底部只保留尺寸/大小/耗时 metadata 行。
++ [调整] `/image` 左侧"生成记录"面板折叠/展开按钮改为带 CSS 动画：`grid-template-columns` 加 `transition` 300ms ease-in-out，宽度变化平滑滑动而不是瞬切。`aside` 的内边距也跟着过渡，视觉一致。
++ [调整] 提示词输入框旁的「AI 优化」按钮重命名为「提示词优化」，文案更明确。所有使用 `<PromptImproveBar>` 的位置（生图工作台 / 画布节点 prompt 面板 / 画布助手输入框）一并生效。
+
 ## v0.0.17 - 2026-05-22
 
 + [新增] **加入提示词库**：`/image/{id}` 详情页"生成结果"标题旁新增「加入提示词库」按钮（仅在有成功图片时显示）。点击后弹出 Modal：必填标题（≤30 字）、从该记录成功的缩略图里选 1 张作为效果图、分类（默认 system）、标签（输入后回车添加；每个 ≤6 字、最多 8 个），提示词内容默认填入 record.prompt 可编辑。提交进 `pending` 审核队列。后端 `model.Prompt` 加 `Visibility`（public/pending/rejected）和 `SubmitterID` 字段，前台 `/prompts` 强制 `visibility=public-only`（兼容历史无 visibility 数据）不会漏出 pending。新增端点：`POST /api/prompts/submit`（普通用户）+ `POST /api/admin/prompts/:id/review`（管理员）。

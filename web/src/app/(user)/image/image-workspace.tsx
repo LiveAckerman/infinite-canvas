@@ -695,8 +695,8 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
-      <main className={`grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:overflow-hidden ${leftPanelCollapsed ? "lg:grid-cols-[44px_minmax(0,1fr)]" : "lg:grid-cols-[300px_minmax(0,1fr)] xl:grid-cols-[320px_minmax(0,1fr)]"}`}>
-        <aside className={`thin-scrollbar hidden min-h-0 overflow-y-auto rounded-lg border border-stone-200 bg-card shadow-sm dark:border-stone-800 lg:flex lg:flex-col ${leftPanelCollapsed ? "items-center p-2" : "p-4"}`}>
+      <main className={`grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 transition-[grid-template-columns] duration-300 ease-in-out lg:overflow-hidden ${leftPanelCollapsed ? "lg:grid-cols-[44px_minmax(0,1fr)]" : "lg:grid-cols-[300px_minmax(0,1fr)] xl:grid-cols-[320px_minmax(0,1fr)]"}`}>
+        <aside className={`thin-scrollbar hidden min-h-0 overflow-y-auto rounded-lg border border-stone-200 bg-card shadow-sm transition-[padding] duration-300 ease-in-out dark:border-stone-800 lg:flex lg:flex-col ${leftPanelCollapsed ? "items-center p-2" : "p-4"}`}>
           {leftPanelCollapsed ? (
             <button
               type="button"
@@ -900,19 +900,22 @@ function GenerationSettings({ config, updateConfig }: { config: AiConfig; update
 function ResultImageCard({ image, index, onEdit, onDownload, onSaveAsset, onRefine }: { image: GeneratedImage; index: number; onEdit: (image: GeneratedImage, index: number) => void; onDownload: (image: GeneratedImage, index: number) => void; onSaveAsset: (image: GeneratedImage, index: number) => void; onRefine?: (image: GeneratedImage) => void }) {
   return (
     <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
-      <Image src={image.dataUrl} alt={`生成结果 ${index + 1}`} className="aspect-square object-cover" />
-      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-stone-200 px-3 py-2.5 dark:border-stone-800">
-        <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-xs text-stone-500 dark:text-stone-400">
-          {image.width && image.height ? <span>{image.width}x{image.height}</span> : null}
-          {image.bytes ? <span>{formatBytes(image.bytes)}</span> : null}
-          {image.durationMs ? <span>{formatDuration(image.durationMs)}</span> : null}
+      {/* 桌面端：图片 hover 才显示按钮浮层；移动端：始终显示（lg:opacity-0 控制只让 lg+ 默认隐藏） */}
+      <div className="group relative">
+        <Image src={image.dataUrl} alt={`生成结果 ${index + 1}`} className="aspect-square object-cover" />
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-wrap items-end justify-end gap-1.5 bg-gradient-to-t from-black/70 via-black/35 to-transparent p-2 opacity-100 transition-opacity duration-150 lg:opacity-0 lg:group-hover:opacity-100">
+          <div className="pointer-events-auto flex flex-wrap justify-end gap-1">
+            {onRefine ? <Button size="small" type="primary" icon={<Sparkles className="size-3.5" />} onClick={() => onRefine(image)}>AI 微调</Button> : null}
+            <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => void onSaveAsset(image, index)}>素材</Button>
+            <Button size="small" icon={<PenLine className="size-3.5" />} onClick={() => void onEdit(image, index)}>参考图</Button>
+            <Button size="small" icon={<Download className="size-3.5" />} onClick={() => onDownload(image, index)}>下载</Button>
+          </div>
         </div>
-        <div className="flex shrink-0 gap-1">
-          {onRefine ? <Button size="small" type="primary" icon={<Sparkles className="size-3.5" />} onClick={() => onRefine(image)}>AI 微调</Button> : null}
-          <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => void onSaveAsset(image, index)}>添加到素材</Button>
-          <Button size="small" icon={<PenLine className="size-3.5" />} onClick={() => void onEdit(image, index)}>加入参考图</Button>
-          <Button size="small" icon={<Download className="size-3.5" />} onClick={() => onDownload(image, index)}>下载</Button>
-        </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-stone-200 px-3 py-2 text-xs text-stone-500 dark:border-stone-800 dark:text-stone-400">
+        {image.width && image.height ? <span>{image.width}x{image.height}</span> : null}
+        {image.bytes ? <span>{formatBytes(image.bytes)}</span> : null}
+        {image.durationMs ? <span>{formatDuration(image.durationMs)}</span> : null}
       </div>
     </div>
   );
