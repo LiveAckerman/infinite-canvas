@@ -2,7 +2,7 @@
 
 import { BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, ImageOff, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { App, AutoComplete, Button, Checkbox, Drawer, Empty, Image, Input, InputNumber, Modal, Select, Tag, Typography } from "antd";
 
@@ -70,6 +70,8 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
   const [selectedLogIds, setSelectedLogIds] = useState<string[]>([]);
   const [previewLog, setPreviewLog] = useState<GenerationRecord | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  // 拖拽图片到提示词 / 参考图区域时的视觉高亮，松手或离开时复位
+  const [dragHighlight, setDragHighlight] = useState(false);
   const autoPreviewedIdRef = useRef<string | null>(null);
   // 用 ref 跟踪 generate() 是否还在跑：useEffect/previewGenerationLog 的 closure
   // 可能拿到 stale 的 running state（先于 setRunning(true) commit 触发），
@@ -149,13 +151,28 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
     return () => window.clearInterval(timer);
   }, [running, startedAt]);
 
+  // 统一的"把若干 blob 上传成参考图"入口，供按钮上传 / 剪贴板 / 提示词 paste / 拖拽四种触发方式共用。
+  // 单张失败只跳过那一张，其余继续，避免一张图挂了全员失败。
+  const addReferencesFromBlobs = async (blobs: Blob[], hintPrefix = "ref") => {
+    if (!blobs.length) return 0;
+    const successes = await Promise.all(blobs.map(async (blob, index) => {
+      try {
+        const image = await uploadWithToast(blob, { label: "参考图" });
+        const fallbackName = `${hintPrefix}-${Date.now()}-${index + 1}.png`;
+        const name = blob instanceof File && blob.name ? blob.name : fallbackName;
+        return { id: createId(), name, type: image.mimeType, dataUrl: image.url, storageKey: image.storageKey } as ReferenceImage;
+      } catch {
+        return null;
+      }
+    }));
+    const next = successes.filter((item): item is ReferenceImage => item !== null);
+    if (next.length) setReferences((value) => [...value, ...next]);
+    return next.length;
+  };
+
   const addReferences = async (files?: FileList | null) => {
     const imageFiles = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
-    const nextReferences = await Promise.all(imageFiles.map(async (file) => {
-      const image = await uploadWithToast(file, { label: "参考图" });
-      return { id: createId(), name: file.name, type: image.mimeType, dataUrl: image.url, storageKey: image.storageKey };
-    }));
-    setReferences((value) => [...value, ...nextReferences]);
+    await addReferencesFromBlobs(imageFiles, "upload");
   };
 
   const addReferencesFromClipboard = async () => {
@@ -166,15 +183,48 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
         message.error("剪切板里没有可读取的图片");
         return;
       }
-      const nextReferences = await Promise.all(blobs.map(async (blob, index) => {
-        const image = await uploadWithToast(blob, { label: "参考图" });
-        return { id: createId(), name: `clipboard-${index + 1}.png`, type: image.mimeType, dataUrl: image.url, storageKey: image.storageKey };
-      }));
-      setReferences((value) => [...value, ...nextReferences]);
-      message.success(`已读取 ${nextReferences.length} 张参考图`);
+      const count = await addReferencesFromBlobs(blobs, "clipboard");
+      if (count) message.success(`已读取 ${count} 张参考图`);
+      else message.error("剪切板里的图片上传失败");
     } catch {
       message.error("剪切板里没有可读取的图片");
     }
+  };
+
+  // textarea 原生 paste 事件：拦截 clipboardData 里的图片项（一张或多张），
+  // 不阻止文字 paste，只在出现图片时 preventDefault 阻止 base64 文本被塞进 prompt。
+  const handlePromptPaste = (event: ReactClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(event.clipboardData?.items || []);
+    const files = items
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (!files.length) return;
+    event.preventDefault();
+    void addReferencesFromBlobs(files, "paste");
+  };
+
+  // 拖拽进入：只有 dataTransfer.types 含 "Files" 才高亮，避免文本拖动也变蓝。
+  const handleDragOver = (event: ReactDragEvent<HTMLElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setDragHighlight(true);
+  };
+  const handleDragLeave = (event: ReactDragEvent<HTMLElement>) => {
+    // relatedTarget 在容器内移动时是子元素，不算真离开
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setDragHighlight(false);
+  };
+  const handleDropFiles = (event: ReactDragEvent<HTMLElement>) => {
+    event.preventDefault();
+    setDragHighlight(false);
+    const files = Array.from(event.dataTransfer.files || []).filter((file) => file.type.startsWith("image/"));
+    if (!files.length) {
+      if (event.dataTransfer.files?.length) message.error("拖入的不是图片，已忽略");
+      return;
+    }
+    void addReferencesFromBlobs(files, "drop");
   };
 
   const generate = async () => {
@@ -615,8 +665,12 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
                   <Input.TextArea
                     value={prompt}
                     onChange={(event) => setPrompt(event.target.value)}
+                    onPaste={handlePromptPaste}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDropFiles}
                     rows={7}
-                    placeholder="描述画面主体、风格、构图、光线和用途"
+                    placeholder="描述画面主体、风格、构图、光线和用途；也可在这里粘贴或拖入图片直接作为参考图"
                   />
                 </div>
 
@@ -628,11 +682,17 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
                       <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>上传</Button>
                     </div>
                   </div>
-                  <div className="hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed border-stone-300 p-2 pb-3 overscroll-x-contain dark:border-stone-700" onWheel={(event) => {
-                    if (event.currentTarget.scrollWidth <= event.currentTarget.clientWidth) return;
-                    event.preventDefault();
-                    event.currentTarget.scrollLeft += event.deltaY;
-                  }}>
+                  <div
+                    className={`hover-scrollbar hover-scrollbar-hint relative flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed p-2 pb-3 overscroll-x-contain transition-colors ${dragHighlight ? "border-blue-500 bg-blue-50/40 dark:border-blue-400 dark:bg-blue-500/10" : "border-stone-300 dark:border-stone-700"}`}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDropFiles}
+                    onWheel={(event) => {
+                      if (event.currentTarget.scrollWidth <= event.currentTarget.clientWidth) return;
+                      event.preventDefault();
+                      event.currentTarget.scrollLeft += event.deltaY;
+                    }}
+                  >
                     {references.map((item) => (
                       <div key={item.id} className="group relative size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
                         <img src={item.dataUrl} alt={item.name} className="size-full object-cover" />
@@ -641,7 +701,10 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
                         </button>
                       </div>
                     ))}
-                    {!references.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">暂无参考图</div> : null}
+                    {!references.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">{dragHighlight ? "松开以添加参考图" : "暂无参考图，可粘贴 / 拖入 / 点击上方按钮添加"}</div> : null}
+                    {dragHighlight && references.length ? (
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-lg bg-blue-500/5 text-sm font-medium text-blue-600 dark:text-blue-300">松开以添加参考图</div>
+                    ) : null}
                   </div>
                 </div>
 

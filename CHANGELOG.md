@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v0.0.16 - 2026-05-22
+
++ [新增] `/image` 生图工作台输入提示词的方式扩展到 4 种（之前只有"点上传按钮 / 点剪切板按钮"两种）：
+  - 提示词输入框直接 `Ctrl/Cmd+V` **粘贴**图片，支持一次粘贴多张；图片不会出现在 prompt 文本里，而是直接进参考图列表；
+  - 提示词输入框可以**拖入**图片（一次拖多张）；
+  - 参考图区域也可以拖入图片；
+  - 拖入时输入框 / 参考图区域出现蓝色高亮 + "松开以添加参考图" 提示；
+  - 非图片类型拖入会被忽略并 toast 提示。四个入口（按钮上传 / 剪切板 / 提示词粘贴 / 拖拽）共用同一个 `addReferencesFromBlobs` helper，单张上传失败只跳过那一张不影响其他张。
++ [修复] 启用新 AI 上游配置「主号池-2」（`cpam.lijiwang.top`，反代到本机 `127.0.0.1:18317` 的 cpa-manager）后，生图统一返回中文提示「上游服务异常（502 Bad Gateway），请稍后再试」。错误并非业务 / 鉴权 / 上游真挂——而是 **`cpam.lijiwang.top` 的 nginx 配置缺了 `proxy_read_timeout` 和 `client_max_body_size`**：默认 60s 读超时让 1-2 分钟的图生图请求一律被 nginx 切，错误透传到 infinite-canvas 后端被 `parseUpstreamMessage` 友好化成 502 文案；同时 multipart 参考图遇到默认 1MB 上限会 `client intended to send too large body: 1904802 bytes`。**额外根因**：`/etc/nginx/sites-enabled/cpam.lijiwang.top` 不是指向 `sites-available` 的 symlink 而是一个被 nginx-panel 独立维护的实文件，之前几次改 `sites-available` 都没生效。这次把 sites-enabled 改成 symlink 并写入 `client_max_body_size 50M;` + `proxy_read_timeout/send_timeout 600s` + `proxy_buffering off` + `proxy_request_buffering off`，与 `chatgpt2api.lijiwang.top`、`infinite-canvas.lijiwang.top` 那两份配置对齐。
+
 ## v0.0.15 - 2026-05-22
 
 + [修复] 生图工作台点「开始生成」后页面立刻显示「生成失败 / 生成被中断，请点击重试」（即便后端 `/api/v1/images/generations` 200、`/api/images` 200，task 实际跑成功了 UI 仍然中断）。**真正根因**：`/image/page.tsx` 和 `/image/[id]/page.tsx` 是两个独立的 page 组件，generate() 走到 `router.replace('/image/{id}')` 时整个 `<ImageWorkspace>` 被 React 卸载并在新路由下重挂载——所有 `useRef`（包括 v0.0.13 加的 `isGeneratingRef` / `activeGenerationIdRef`）全部重置成初始值，旧实例的 closure 里 generate 还在跑，新实例完全没有 generate 的状态，看到 logs 缓存里 status=running 的 placeholder 就当成"中断"。前两轮 closure 修复在跨实例 race 下完全失效。**这次的修复**：新增 `app/(user)/image/layout.tsx`，把 `<ImageWorkspace>` 抬到 layout 层渲染，跨 `/image` 与 `/image/[id]` 共享同一个组件实例（Next.js App Router 的 layout 在子路由切换时不会卸载）；两个 `page.tsx` 改为 `return null`，仅作路由占位。从此 `router.replace` 只触发 props 变化不再 remount，generate 全程跑在同一个实例上，ref / state / setResults 都生效。
