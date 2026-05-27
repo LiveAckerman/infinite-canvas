@@ -2,6 +2,88 @@
 
 ## Unreleased
 
+## v0.0.20 - 2026-05-22
+
++ [新增] **流水线列表卡支持「重新执行」**：之前「执行 / 多选执行 / 全部执行」只对「待执行（paused + 有 seed）」状态生效，导致已完成 / 失败的 run 想再跑一次只能去详情页点「全部重跑」。现在 list 卡的「eligible」语义扩展为「有 seed 且不在跑」—— 涵盖 paused / success / partial / failed 四种状态：
+  - **单条**：有产物的 run（success / partial / failed / 跑了一半 paused）主按钮保持「打开」(看历史结果是高频操作)，旁边并列一个次要按钮「↻ 重新执行」（`RotateCw` 图标 + tooltip 说明"清空旧产物从第 1 步重新跑"）。
+  - **多选 / 全部**：Checkbox / 顶部「执行选中 N」「全部执行 N」覆盖范围同步扩大；批量工具栏下方加一行提示文案「包含「待执行」「已完成」「失败」的流程；点了会清掉旧产物从第 1 步重新跑。想保留旧结果请改用「复制」」，避免用户误触把已完成的 run 全清掉。
+  - **启动逻辑**：内部抽出 `buildResetRun()` —— 把每步 status 重置为 idle，清掉 outputKey / errorMessage / durationMs / lastRunSnapshot，再把整体 status 推到 queued。这是必要的，否则调度器 `runRun` 看到 `step.status === "success"` 会跳过整步，「重新执行」就会变成「无操作」。
+  - 旧 outputKey 对应的图床文件**不删**，已经被加入素材 / 复制 run 引用的图都不受影响。
+  - 状态 pill：success → 「全部完成」绿色；partial → 「部分完成 N/M」橙色；failed → 「失败」红色。点「重新执行」后立即变蓝色 → 排队中 → 运行中。
+
++ [新增] **流水线单步「迭代微调」模式**：详情页一步如果**已经成功跑过有产物**了，用户在附加说明里加一段指令（例如「将衣服改成红色」），点重做按钮时会切到「迭代」模式 —— 把这一步**自己刚才的产物**作为输入图、叠加上新附加说明再调用模型一次，**不会**从上游产物 / seed 重新跑。典型场景是基于已有结果做小修小补，比起重头跑更快、更能保留之前的构图和风格。如果用户只是常规点重做（没改附加说明）/ 上游变了，仍然按以前的「上游/seed/手动覆盖 + 角色提示词」重头跑。
+  - **触发条件**（跟 backend snapshot 的 `inputSource` 字段联动）：本步有 outputKey + 附加说明非空且跟 lastRunSnapshot.extraNote 不同 + 「上次本身就是 iterate」或「上次是 upstream 且 upstream 至今没变」。其它情况按 vanilla 重做走。
+  - **UI 提示**：当下一次点击会走迭代时，按钮文案换成「基于产物微调」、图标变成 `Sparkles`、`Tag` 由金色「上游已变更」改成紫色「将基于产物迭代」；Tooltip 写明这两种行为差异（迭代 vs 重头跑）。
+  - **持续迭代**：连续多次「加一点说明 → 微调」会持续基于最新一次的 outputKey 迭代下去（不会回退到上游），靠 `lastRunSnapshot.inputSource: "iterate"` 标记保持链条。
+  - **stale 检测同步调整**：上次是 iterate 模式时只看附加说明是否又变了（上游变了不再触发 stale），避免迭代过一次后永远被误判为「上游已变更」。
+  - **后端**：`model.PipelineRunStepSnapshot` 加 `InputSource string` 字段（`omitempty`，老数据缺省视作 `upstream`，零迁移压力）。前端 `PipelineRunStepSnapshot.inputSource` 同步加。
+
++ [调整] **执行流程改成手动触发**：之前上传完原图就自动 queued 让调度器跑，现在改成「上传原图后保持 paused 状态」，由用户**显式触发**才进 queued。三种触发方式：
+  - **单条**：每张卡片在「已上传原图 + 待执行」状态下显示蓝色「▶ 执行」主按钮（替代「打开」位置），点了把 status 推到 queued。
+  - **多选**：每张「待执行」卡片左上角有 Checkbox 可勾，列表上方批量工具栏显示「全选可执行（N）/ 已选 N 条 / 执行选中 / 全部执行」。勾中态卡片有蓝色 ring 高亮；非「待执行」状态的卡 Checkbox 置灰、勾不上。
+  - **全部**：批量工具栏右侧「全部执行（N）」蓝色主按钮，一键把所有「待执行」run 推进 queued，调度器按 cap=3 顺序跑。
+  - 状态 pill 文案区分：seed 未传 → 金色「待上传原图」；seed 已传 + paused → 金色「待执行」；queued / running / success / partial / failed 不变。
+  - 后端：`saveMyPipelineRun` 不再因为上传 seed 自动改 status，前端 PUT 时显式带 `status: "queued"` 才触发执行；批量串行 PUT（避免一次性打太多写请求），调度器最终用 cap=3 并发跑。
+
++ [修复] **流水线 detail 页单步「用新输入重做」/「重做」/「重试」的三个体验问题**：
+  - **点击按钮没有 loading 反馈**：根因是 `runSingleStep` 先 `await persistRun(running 状态)` 才会让 cache 进入 running 态，整个 PUT 往返期间 UI 没动静。改成「立刻乐观把 step.status 同时改到 list 和 detail 两份 react-query 缓存（`applyStepPatchOptimistically`），PUT 在后台异步走」，点完按钮**立刻**出 `Loader2` spinner + 「正在生成…」。
+  - **重做完产物没立即替换**：同样的乐观更新模式 —— `invokeStep` 一返回，先把 `outputKey + status: success + durationMs` 写进缓存（两份），用户**立刻**看到新图，然后才在后台 PUT 写库。失败也立刻显示红色错误条 + 重试。
+  - **用户填写的附加说明被覆盖丢失**：根因是详情页用 `[...RUNS_QUERY_KEY, runId]` detail cache，runner 读 `RUNS_QUERY_KEY` list cache，两份不同步；并且 runner 的 PUT 用了**事先抓的 `working` 快照**，会把用户在 `invokeStep` 期间在 detail 页继续敲的附加说明、换的角色、换的覆盖图全覆盖回旧值。解决方案：① 详情页的 `patchRun` 改成「乐观更新 detail + list 两份缓存」+ 「不在 mutation onSuccess 里 `setQueryData`」，避免服务器响应延迟把用户连续打字的字符回退；② runner `persistRun` 在 PUT 前用 `mergeUserEditableFields` 从最新缓存里读回 `extraNote / manualOverrideKey / agentId / agentName / avatarUrl` 等**用户可编辑字段**，保证 runner 的 PUT 只写 runner 自己管的字段（status / outputKey / errorMessage / durationMs / lastRunSnapshot），不动用户编辑的部分。
+  - 附带修复：`handleRestartAll` / `handleContinueFromStep` 改走同一个 `patchRun` 通道，统一乐观写两份缓存，UI 切到 `queued` 立刻反应；连点连改场景下不会再出现 textarea 字符消失。
+
++ [重构] **流水线模式拆分成「模板 + 执行流程」两套概念**（option A 方案，浏览器端并发 cap=3）：
+  - **流水线模板（编排）**：新建 / 编辑全部走 Modal（`PipelineTemplateModal`），关闭时有 dirty 检测 + 二次确认。「管理流水线模板」按钮弹 `PipelineTemplateManagerModal` 列出 / 复制 / 删除 / 编辑全部模板。原来 `/agents` 主区域内嵌的编辑器全部撤掉。
+  - **执行流程（运行实例）**：新表 `pipeline_runs`（id / user_id / pipelineId / pipelineNameSnap / seedKey / steps[JSON] / status / 时间戳）+ CRUD 接口 `me.{GET,POST,GET,PUT,DELETE} /api/pipeline-runs/me[/:id]` + 流式 zip 下载 `GET /api/pipeline-runs/me/:id/zip`（stdlib `archive/zip` 边读边写，零内存压力，按 `{序号}_{角色名}.{ext}` 命名）。
+  - **新增执行流程**：「+ 新增执行流程」按钮弹 `PipelineRunCreateModal`：Select 模板 + 上传原图（复用 `PipelineSeedCard`）+ 启动 → 后端 `POST /api/pipeline-runs/me` 创建 run（status=queued，每步 agentName/avatarUrl 快照到 step 里，模板被删/角色被改名都不会丢）→ 前端 cache 立即插入新行 → RunManager 接管。
+  - **客户端调度器 `usePipelineRunManager`**：单 tab 级别，cap=3 并发；从 react-query 缓存里挑 queued run，启动后串行跑步骤，每步开始/结束 PUT 写回后端；用 `inflightIdsRef`/`cancelledIdsRef` 锁防止并发触发与中途停止；终态判定 success/partial/failed。挂在 `/agents/layout.tsx` 的 `PipelineRunManagerProvider` 里，列表页与详情页共用同一个调度器实例，跨页导航不打断在跑 run。
+  - **执行流程列表卡**：`PipelineRunCard` 显示模板名 + 状态 pill（排队中 / 运行中 N/M / 已暂停 / 全部完成 / 部分完成 / 失败）+ seed → 步骤的小缩略图横排（状态色：绿成功 / 红失败 / 蓝脉冲运行中 / 灰未运行）+「打开」「下载所有产物 (zip)」「删除」三按钮。当列表里有 queued/running 项时 react-query refetchInterval 3 秒拉一次列表，否则不轮询省请求。
+  - **执行流程详情页 `/agents/runs/[id]`**：子路由（不是 Modal，方便分享 / 刷新 / 书签）。顶栏「返回 / 模板名 / 状态 / 步骤计数 / 全部重跑 / 下载 zip / 删除」；下方原图卡 + 步骤卡链。每张步骤卡支持：① 改附加说明（PUT 回库）、② 替换输入图（手动覆盖，走 `useImageUploader`）、③ 单步「重做 / 重试」（直接调 `runner.runSingleStep` 不走队列、不影响其它步）、④ 「从此处续跑」（把该步及之后全部重置为 idle + run 标 queued → RunManager 接管）、⑤ stale 判定（输入 key 或附加说明跟 lastRunSnapshot 不一致时显示金色「上游已变更」+「用新输入重做」按钮文案）、⑥ 失败显示红色错误条、⑦ 切换该步的角色（不再用拖拽换序，运行实例不能改顺序）。
+  - **角色 / 模板被删的兜底**：run 创建时 snap 了角色名 + 头像，模板被删后 run 详情仍能渲染；如果某步引用的 agent.id 已经不存在，对应步骤显示红色「角色已删除」+ Select 可改成存在的角色。模板管理 Modal 里每条模板用红色 Tag 标「N 个角色已删」。
+  - **顶栏提示「单浏览器最多并行 3 条；超出会进排队」**，缓解多 tab 用户期望（每 tab 自己 cap=3，未做全局协调）。
+
++ [新增] **流水线运行时持久化**：`/agents` 流水线模式跑出的产物（seed 原图 + 每一步的输出图 / 状态 / 错误 / lastRunSnapshot / 手动覆盖图 / 用时）现在按用户 + 流水线 id 隔离存到 localStorage（key=`infinite-canvas:agents:pipeline-runtime:{userId}:{pipelineId}`），刷新页面 / 重开浏览器都能恢复上次跑的结果。图床里的图本来就在服务器，前端只持久化 storageKey 数组，URL 在恢复时通过 `imageUrl(key)` 现拼。`running` 状态降级为 `idle`（页面挂掉后 task 没法续跑，留个手动重跑的入口）；删除流水线时同步清掉对应的 localStorage 快照。切换流水线 / 切账号都会自动加载新 id 对应的快照，A 看不到 B 的运行结果。
++ [调整] **`/agents` 整页 UI 优化 + 移动端/桌面端兼容**：大布局（左库右 Tab）不变，按 `frontend-design` skill 的 8 点 checklist 走了一遍，集中处理了多个样式 bug 和窄屏体验问题——
+  - **页头**：标题 `text-xl` 起步（lg+ `text-2xl`），副标题 `< sm` 隐藏（窄屏给工作区留出更多垂直空间）。
+  - **左库 mobile 限高**：手机/平板 stacked 模式下侧栏 `max-h-[45vh]`，避免长角色列表把右侧 Tab 推到首屏外；桌面 `lg:max-h-none` 恢复全高独立滚动。
+  - **Tabs 内边距响应式**：手机 `px-3 pb-3`，桌面 `lg:px-4 lg:pb-4`，对应 antd 内部 `[&_.ant-tabs-nav]` / `[&_.ant-tabs-content-holder]` 都做了断点。
+  - **流水线模式工具栏合并**：原来「选择条」+「控制条」两条独立 bar 合并为一条横向工具栏，主操作（▶ 运行）放右侧 `ml-auto`、视觉权重最高；次要按钮（另存为 / 复制 / 删除）在 `< md` 只露图标省宽度；状态提示文本独立成一行轻量元信息。
+  - **流水线 step / seed 卡响应式宽度**：`w-[280px] sm:w-[300px]` / `w-[240px] sm:w-[260px]`，窄屏更紧凑；末尾「+ 添加步骤」按钮同步 `w-[140px] sm:w-[160px]`。
+  - **触摸目标加大**：grip 把手 / X 按钮 / ⋯ 菜单从 `size-6` (24px) 升到 `size-7` (28px)，符合移动端 32px 触摸目标的下限。
+  - **工作站卡修复**：① `<input type="file" className="hidden">` 改成 `style={{ display: "none" }} tabIndex={-1} aria-hidden`，跟 skill 里强调的「Tailwind hidden 在 antd Form 上下文会失效」对齐统一；② 状态徽标移到独立的第 2 行右对齐，避免「长角色名 + 长状态 pill + X」三者抢宽度互挤；③ 去掉 `min-w-[260px]` 强制宽度（在窄屏会溢出网格），改用 `min-w-0` 让网格控制。
+  - **工作区网格对齐**：grid 加 `items-stretch`，多列时卡片底部对齐不再参差。
+  - **并行 tab 顶部「生成记录」按钮**：`< sm` 只露图标，文字 hidden，省宽度避免计数 Tag + 描述文本 + 按钮三者挤一行。
+
++ [新增] **`/image` 工作台参考图支持拖动重排**：参考图横向列表里每张缩略图都可以拖动调整顺序，复用画布里同款 `@dnd-kit`。顺序对上游 `/v1/images/edits` 是有语义的（第一张往往被模型当主要构图参考），用户拖完再点开始生成 / 重试时 references 数组就是新顺序。拖动触发距离 6px，X 删除按钮的点击单独 stopPropagation，所以点 × 删除不会被误识别成拖动；同时缩略图加了 `draggable={false}` 阻止浏览器原生「拖图标到地址栏」副作用。
++ [调整] **`/agents` 左侧角色卡的「+ 加入工作区」按钮在流水线模式下隐藏**：这个按钮只有并行模式下有意义（把角色添加到独立工作台网格里）。流水线模式有自己的「+ 添加步骤」+ 角色 Select 来选角色，留这个按钮反而让人误以为也能加进流水线，所以模式切到「流水线」时直接隐藏，只保留卡片底部的「已用 N 次」。`AgentLibraryCard` 新增可选 prop `showAddToWorkspace`（默认 true），`page.tsx` 把 `mode === "parallel"` 透传进去。
+
++ [调整] **`/agents` 改成左库右 Tab 双列布局**：原来「我的角色（顶部横滚卡片）+ 工作区（下方网格）」上下堆叠 + 顶部 Segmented 切换模式，变成 ——
+  - **左侧 280–320px 固定边栏**：「我的角色」列表 + CRUD 全集中在这里，顶部「+ 新建」按钮 + 搜索框 + 下方独立竖向滚动的卡片列表（卡片宽度自适应、不再横滚）；
+  - **右侧主区域 Tab 切换**：`并行模式` / `流水线模式` 改用 antd Tabs，原 Segmented 撤掉；
+  - 两列在桌面端 `lg+` 各自有独立的 `overflow-y-auto`，主页面不再整体滚动；窄屏（< `lg`）退化为「上库 + 下工作区」竖向堆叠，跟之前的体验接近不会丢操作；
+  - 「生成记录」按钮移到并行模式 Tab 内顶部一行，跟工作区计数挨在一起；模式偏好仍然按浏览器 localStorage（`infinite-canvas:agents:mode`）持久化。
+
++ [新增] **角色工作台「流水线」模式（可 CRUD）**：`/agents` 顶部新增 Segmented 切换「并行模式 / 流水线模式」，模式偏好按浏览器持久化。流水线模式让用户把多个角色串成一条链，**上一步的产物自动喂给下一步**，并支持以下完整能力：
+  - **编排**：横向流水线视图，最左侧「原图 seed」卡（拖/粘/上传/剪切板）→ 中间 N 个角色步骤卡（最多 10 步，序号 + 角色 Select 切换 + 附加说明 TextArea + 输入图缩略 + 输出图缩略 + 状态 pill + 单步「重做/重试/运行」按钮）→ 末尾「+ 添加步骤」。步骤间 `ChevronRight` 箭头表示数据流向。
+  - **拖拽换序**：基于 `@dnd-kit/core` + `@dnd-kit/sortable`，每张步骤卡左上 grip 把手；拖完所有步骤的 `lastRunSnapshot` 自动失效（链已变），需要重跑。运行中禁用拖拽。
+  - **三种输入源（每步独立）**：① 来自上一步的产物（默认）；② 用户在该步「替换输入」手动上传一张图覆盖；③ 第一步取 seed。手动覆盖时显示橙色 `Pencil` 图标 + 「手动替换」标签，可一键「用上游」恢复。
+  - **每步独立重做**：每张步骤卡都有自己的「重做 / 重试 / 运行」按钮，**不会自动级联到下游**。下游步骤检测到自己的输入 key 或附加说明跟 `lastRunSnapshot` 不一致时，pill 变金色「上游已变更」、输出图右上角出现琥珀色「已变更」徽标，提示用户手动点重做。
+  - **顶部智能运行按钮**：根据当前状态自动切换标签 ——「▶ 运行流水线」（全部 idle 时）/「▶ 从第 N 步续跑」（有 stale / failed 步骤时）/「▶ 全部重跑」（全部 success 且无 stale 时）。运行中显示「停止」按钮。
+  - **流水线 CRUD**：顶部选择条提供 Select 切换 + 「新建 / 保存 / 另存为 / 复制 / 删除」按钮；有未保存修改时显示橙色 ●「有未保存修改」徽标 + 切换流水线 / 关页面前确认。
+  - **后端新表 `pipelines`**：字段 `id / user_id / name / description / steps(JSON 数组，每条 `{stepId, agentId, extraNote}`) / 时间戳`。CRUD 接口 `me.{GET,POST,DELETE} /api/pipelines/me[/:id]`；service 校验名字≤30 / 描述≤80 / 步骤数 1~10 / 附加说明≤4000，ownership 严格校验；**不**校验 `agentId 必须存在`，允许保存后该角色被删除（前端显示红色「角色已删除」灰态让用户替换）。
+  - **复用现有能力**：单步调上游直接走 `requestEdit`，把「角色固定参考图 + 当前步输入」拼成 references；下载 / 加入素材沿用 workstation 那套；不写流水线 generations 历史（产物只活在 session 内，跟单角色工作台一致）。
+
++ [新增] **角色工作台「生成记录」Drawer**：`/agents` 工作区标题旁加「生成记录」按钮，点击弹出右侧 Drawer 显示从角色工作台发出的所有 generations 记录（默认按角色聚合，顶部 Select 可按指定角色筛选，下方按时间倒序分页 10 条/页）。每条记录显示结果缩略图 / 角色头像 + 名字 / 状态 tag / 提示词截断 / 时间 / 耗时；点击一行在新 Tab 打开 `/image/{id}` 复用已有详情页（提示词、参考图、所有缩略图、加入素材 / 微调 / 加入提示词库等所有现有操作都能用）。
+  - 后端：`/api/generations` 加两个 query 参数 —— `agentId=<id>` 精确筛指定角色，`hasAgent=1` 筛「任意非空 agentId」即只看来自角色工作台的记录，避免把 `/image` 和 canvas 的记录混进来。`model.Query` 加 `AgentID` 和 `HasAgent` 字段，`repository.ListGenerations` 应用 WHERE。
+  - 前端：`agent-workstation` 每次跑完（成功 / 失败都算）都调一次 `saveGeneration` 写库，payload 带 `agentId`、`requestParams.via="agent-workstation"`、缩略图 / references 等，跟 `/image` 工作台的字段对齐；写库失败只是 Drawer 里少一条记录，不打扰用户拿图的主流程。
+  - 父层 `setRecordsRefreshKey` 自增触发 Drawer 内 react-query 重新拉，关闭再打开能记住筛选 + 分页位置。：编辑角色 Modal 的「参考图」区改成 3 个 104×104 的方形槽位，按顺序点 + 逐个加，每张 hover 出现「换 / 删」按钮；不连续的空槽不可点。后端 `agents.reference_image_url` / `reference_image_key` 两列废弃，改为 `reference_image_keys`（JSON 数组），service 层保存时去空白 / 去重 / 截断到最多 3 张。前端 type `Agent.referenceImageKeys: string[]`；workstation 调上游时按顺序把所有角色参考图拼到 `references` 前面 + 用户原图末尾发 `/v1/images/edits`。库卡 / 工作台 chip 都改成显示一排叠放的小缩略图（最多 3 个）+ 「带 N 张参考图」文案。
++ [新增] **角色工作区持久化**：`/agents` 把哪些角色加进了「工作区」按用户 id 隔离地存到 localStorage（key=`infinite-canvas:agents:workspace:{userId}`），刷新页面 / 重开浏览器 / 第二天再来都能恢复用户上次摆放的几张工作台卡片。切账号会自动切到新账号自己的快照（A 看不到 B 的工作区，B 也看不到 A 的）。**注**：工作区里每张卡的临时状态（用户当次上传的原图 / 附加说明 / 当次的结果图）仍然只活在内存里，刷新就丢；上云属于下一轮再做。
++ [修复] 编辑角色 Modal 上传头像 / 参考图时，写入数据库的是浏览器临时 `ObjectURL`（`blob:...`），刷新页面后失效导致角色卡上显示破图。现在统一存服务端直链 `/api/images/{storageKey}`，跨会话 / 跨浏览器 / 跨设备都能正常加载。
++ [新增] **角色工作台 `/agents`（第一版）**：把"常用流程 + 固定提示词"打包成「角色」（带名字、头像、描述、系统提示词、默认尺寸/质量），同页可以加入多个角色到工作区**各自独立处理图片，并行不互扰**。
+  - 后端：新表 `agents`（id / user_id / name / avatar_url / description / system_prompt / default_size / default_quality / usage_count），CRUD 接口挂在 `me.{GET,POST,DELETE} /api/agents/me[/:id]`。同时给 `generations` 加 `agent_id` 字段用于追溯（暂未在 admin 后台展示）。
+  - 前端：新页面 `/agents` 拆三块——① 顶部「我的角色」横向卡片库（头像 + 名字 + 描述 + 已用次数 + ⋯ 菜单：编辑 / 复制一份 / 删除 + 主按钮「加入工作区」），支持名字/描述/提示词关键词搜索；② 下方「工作区」网格：每张卡是一个**独立小工作台**（拖入/粘贴/上传/剪切板原图 + 附加说明 textarea + 开始生成 + 状态 pill：待上传 / 生成中 / 已完成 / 失败），生成成功后展示结果图 + 下载 / 加入素材 / 再来一张，失败给一行错误 + 重试按钮；③ 「新建 / 编辑角色」Modal：头像（首字 fallback + 自动取色 / 可上传图片覆盖，走 `useImageUploader`）、名字（≤20 字）、一行描述（≤80 字）、系统提示词（必填，≤4000 字）、默认尺寸 / 质量。
+  - 单角色单次只生 1 张，复用 `/api/v1/images/{generations,edits}` 反代，不重复造轮子；附加说明会拼到角色 systemPrompt 后面再发上游。
+  - 顶部导航加入「角色工作台」入口（Users 图标），桌面端 nav 与移动端 Drawer 都生效。
+
 ## v0.0.19 - 2026-05-22
 
 + [调整] `/image` 生图工作台提示词输入框的回车键操作改为「按 Enter 直接开始生成、Shift + Enter 换行」，跟主流聊天/创作产品的快捷键习惯对齐。输入框下方加了一行小字提示（`Enter 直接开始生成，Shift + Enter 换行`），placeholder 末尾也追加同样说明。中文输入法候选阶段（`isComposing`）以及 Ctrl/Meta/Alt 组合键全部放行，不会误把"敲回车确认候选词"当成提交；当前正在生成（`running`）或提示词为空时按 Enter 也不触发。

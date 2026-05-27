@@ -5,6 +5,16 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { App, AutoComplete, Button, Checkbox, Drawer, Empty, Image, Input, InputNumber, Modal, Select, Tag, Typography } from "antd";
+import {
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import { SortableContext, arrayMove, horizontalListSortingStrategy, useSortable } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { SubmitPromptModal } from "@/components/prompts/submit-prompt-modal";
@@ -101,6 +111,21 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
 
   const canGenerate = Boolean(prompt.trim());
   const generationCount = Math.max(1, Math.min(10, Number(config.count) || 1));
+
+  // 参考图水平拖动重排：activationConstraint 让按钮 click 不会被识别成 drag。
+  // 顺序对 /v1/images/edits 是有语义的（第一张通常被模型当主要构图参考），
+  // 用户调整顺序后下一次 generate / 写库的 references 数组都会跟着变。
+  const referenceSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
+  const handleReferenceReorder = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    setReferences((value) => {
+      const oldIndex = value.findIndex((ref) => ref.id === active.id);
+      const newIndex = value.findIndex((ref) => ref.id === over.id);
+      if (oldIndex < 0 || newIndex < 0) return value;
+      return arrayMove(value, oldIndex, newIndex);
+    });
+  };
 
   const logsQuery = useQuery({
     queryKey: ["my-generations", token],
@@ -795,15 +820,21 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
                       event.currentTarget.scrollLeft += event.deltaY;
                     }}
                   >
-                    {references.map((item) => (
-                      <div key={item.id} className="group relative size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
-                        <img src={item.dataUrl} alt={item.name} className="size-full object-cover" />
-                        <button type="button" className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label="移除参考图">
-                          <Trash2 className="size-3.5" />
-                        </button>
-                      </div>
-                    ))}
-                    {!references.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">{dragHighlight ? "松开以添加参考图" : "暂无参考图，可粘贴 / 拖入 / 点击上方按钮添加"}</div> : null}
+                    {references.length ? (
+                      <DndContext sensors={referenceSensors} collisionDetection={closestCenter} onDragEnd={handleReferenceReorder}>
+                        <SortableContext items={references.map((ref) => ref.id)} strategy={horizontalListSortingStrategy}>
+                          {references.map((item) => (
+                            <SortableReferenceThumb
+                              key={item.id}
+                              item={item}
+                              onRemove={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))}
+                            />
+                          ))}
+                        </SortableContext>
+                      </DndContext>
+                    ) : (
+                      <div className="flex min-w-full items-center justify-center text-sm text-stone-500">{dragHighlight ? "松开以添加参考图" : "暂无参考图，可粘贴 / 拖入 / 点击上方按钮添加"}</div>
+                    )}
                     {dragHighlight && references.length ? (
                       <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-lg bg-blue-500/5 text-sm font-medium text-blue-600 dark:text-blue-300">松开以添加参考图</div>
                     ) : null}
@@ -888,6 +919,45 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
       <Modal title="删除生成记录" open={deleteConfirmOpen} onCancel={() => setDeleteConfirmOpen(false)} onOk={() => void deleteSelectedLogs()} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
         确定删除选中的 {selectedLogIds.length} 条生成记录吗？
       </Modal>
+    </div>
+  );
+}
+
+// SortableReferenceThumb 一张参考图缩略图，整张可拖动重排（dnd-kit）。
+//   - 触发距离 6px 才识别为拖动，避免点 × 删除时误触；
+//   - X 按钮的 pointerdown / click 都 stopPropagation，drag 不抢手势；
+//   - <img draggable={false}> 阻止浏览器原生「把图片拖到地址栏 / 另存为」的副作用，
+//     否则会和 dnd-kit 的 pointer 拖动起冲突，鼠标按下立刻变成"拖图标"。
+function SortableReferenceThumb({ item, onRemove }: { item: ReferenceImage; onRemove: () => void }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: item.id });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+    zIndex: isDragging ? 10 : undefined,
+  };
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      {...attributes}
+      {...listeners}
+      className="group relative size-20 shrink-0 cursor-grab touch-none select-none overflow-hidden rounded-md border border-stone-200 active:cursor-grabbing dark:border-stone-800"
+      title="拖动可调整参考图顺序"
+    >
+      <img src={item.dataUrl} alt={item.name} className="pointer-events-none size-full object-cover" draggable={false} />
+      <button
+        type="button"
+        className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          onRemove();
+        }}
+        aria-label="移除参考图"
+      >
+        <Trash2 className="size-3.5" />
+      </button>
     </div>
   );
 }

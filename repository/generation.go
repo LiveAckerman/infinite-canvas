@@ -23,7 +23,8 @@ func GetGenerationByID(id string) (model.Generation, bool, error) {
 	return item, true, nil
 }
 
-// ListGenerations 返回用户生图历史。
+// ListGenerations 返回用户生图历史。可选按 agentId 过滤（仅来自指定角色工作台的记录），
+// 或按 hasAgent=true 过滤（任意非空 agentId，即「只看角色工作台的记录」）。
 func ListGenerations(userID string, q model.Query) ([]model.Generation, int64, error) {
 	db, err := DB()
 	if err != nil {
@@ -31,6 +32,13 @@ func ListGenerations(userID string, q model.Query) ([]model.Generation, int64, e
 	}
 	q.Normalize()
 	tx := db.Model(&model.Generation{}).Where("user_id = ?", userID)
+	if q.AgentID != "" {
+		// 指定 agent：精确匹配，覆盖 HasAgent
+		tx = tx.Where("agent_id = ?", q.AgentID)
+	} else if q.HasAgent {
+		// 仅看角色工作台的记录（agent_id 非空 / 非 null）
+		tx = tx.Where("agent_id IS NOT NULL AND agent_id <> ?", "")
+	}
 
 	var total int64
 	if err := tx.Count(&total).Error; err != nil {

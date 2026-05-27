@@ -10,8 +10,13 @@ type Query struct {
 	Type       string
 	Visibility string
 	UserID     string
-	Page       int
-	PageSize   int
+	// AgentID 仅用于 /api/generations 按角色筛选：非空表示只看这个 agent 的生成记录。
+	AgentID string
+	// HasAgent 仅用于 /api/generations：非空表示「只看来自角色工作台的记录」（agent_id 非空）。
+	// 跟 AgentID 同时存在时 AgentID 生效。
+	HasAgent bool
+	Page     int
+	PageSize int
 }
 
 func (q *Query) Normalize() {

@@ -31,13 +31,17 @@ func parseQuery(r *http.Request) model.Query {
 	q := r.URL.Query()
 	page, _ := strconv.Atoi(q.Get("page"))
 	pageSize, _ := strconv.Atoi(q.Get("pageSize"))
+	hasAgent := q.Get("hasAgent")
 	return model.Query{
 		Keyword:    q.Get("keyword"),
 		Tags:       q["tag"],
 		Category:   q.Get("category"),
 		Type:       q.Get("type"),
 		Visibility: q.Get("visibility"),
-		Page:       page,
-		PageSize:   pageSize,
+		AgentID:    q.Get("agentId"),
+		// 接受 "1" / "true" 两种常见前端写法
+		HasAgent: hasAgent == "1" || hasAgent == "true",
+		Page:     page,
+		PageSize: pageSize,
 	}
 }

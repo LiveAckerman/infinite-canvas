@@ -68,32 +68,48 @@ config/       env + godotenv 加载
 ```
 web/src/
   app/
-    (user)/      普通用户路由：canvas、assets、asset-library、prompts、image、login
-    (admin)/     管理后台：admin/{users,prompts,assets,prompt-categories}
+    (user)/      普通用户路由：canvas、image、agents、prompts、assets、asset-library、profile、changelog、login
+    (admin)/     管理后台：admin/{users,prompts,assets,prompt-categories,ai-configs,generations,credit-logs}
   components/    跨页面共享组件 + ui/（shadcn）
-  services/api/  所有后端 API 请求统一收口
-  stores/        Zustand 全局 store（ai-config、asset、theme、user、config-dialog）
-  lib/           工具函数：canvas-theme、id、image-utils、localforage-storage、ai-config
+  services/api/  所有后端 API 请求统一收口（envelope `{code,data,msg}`）
+  stores/        Zustand 全局 store（ai-config、theme、user）
+  lib/           工具函数：canvas-theme、id、image-utils、ai-config、use-image-uploader
 ```
 
 画布页面位于 `app/(user)/canvas/`，**画布相关状态和组件都收敛在该目录内部**（`stores/use-canvas-store.ts`、`components/`、`utils/`、`constants.ts`、`types.ts`）。不要把画布状态抽到全局 `stores/`。
 
-### 关键边界：图片与业务数据的本地存储
+`/image` 生图工作台主体在 `app/(user)/image/layout.tsx` 渲染（`<ImageWorkspace>`），`/image/page.tsx` 与 `/image/[id]/page.tsx` 都是 `return null`。这是为了**让 ImageWorkspace 在 `router.replace('/image/{id}')` 时不被卸载重挂载**，避免一次生成跑在两个 React 实例上撕裂 state/ref。仿照新页面想做类似深链时要注意同样模式。
 
-画布项目、我的素材、AI Key 当前**都保存在浏览器本地**，未做服务端同步——文档里不要误写成已支持云同步。
+### 数据存储边界（已经上云）
 
-- 业务列表/JSON / 大对象 / 图片 Blob → **`localforage`**（见 `lib/localforage-storage.ts`、`services/image-storage.ts`）
-  - 画布项目: db=`infinite-canvas` store=`app_state` key=`infinite-canvas:canvas_store`
-  - 我的素材: 同 db/store, key=`infinite-canvas:asset_store`
-  - 图片 Blob: db=`infinite-canvas` store=`image_files`
-- 极小简单配置 → `localStorage`
-- 画布 JSON 不存大体积 base64，节点只保存 `storageKey` + 元信息，Blob 经 `storageKey` 取回
+**早期文档说"画布项目、素材、AI Key 都在浏览器本地、未上云"——这是过时信息，不要再这么写。** 当前状态：
+
+- **画布、我的素材、生图记录（generations）、角色（agents）、提示词（prompts）** 全部走后端，按 `user_id` 隔离；列表统一 `/api/<resource>/me` 或 `/api/<resource>`。
+- **图片二进制** 落服务器磁盘（默认 `data/uploads/{userId}/`），数据库 `images` 表只存 `path + meta`；前端拿到的 `storageKey` (`img-xxx`) 都通过 `GET /api/images/:id` 渲染（公开访问，不带 Authorization 也能 200，命中 `Cache-Control: public, max-age=86400, immutable`）。
+- **AI 上游配置（Base URL / API Key / model）** 落 `ai_configs` 表，由管理员在 `/admin/ai-configs` 维护；普通用户拿不到。
+- 仍在浏览器本地的只剩：① 用户的轻量偏好（`use-ai-config-store.ts` 只存 `size / quality / count`，并自动上传到 `/api/user/preferences`）；② 个别 UI 状态（如 `/image` 左侧面板是否收起）放 `localStorage`；③ 早期 IndexedDB（`image_files_{userId}`）仅作向后兼容读取，新代码不再写入。
 
 图片节点结构和兼容边界详见 [docs/canvas-data-structure.md](docs/canvas-data-structure.md)。
 
-### AI 调用模型
+### AI 调用模型（已改成后端反代）
 
-**前端直接** 请求 OpenAI 兼容接口（`/v1/images/generations`、`/v1/images/edits`、`/v1/chat/completions`、`/v1/models`），Base URL / API Key / 默认模型由用户在浏览器本地配置（`use-ai-config-store.ts`）。后端不代理这些请求。涉及安全说明时要写清这一点。
+**早期文档说"前端直接请求 OpenAI 兼容接口"——也是过时的。** 当前所有 AI 请求统一走后端反代：
+
+- 前端调 `/api/v1/images/generations`、`/api/v1/images/edits`、`/api/v1/chat/completions`、`/api/v1/models`；后端读取当前启用的 `ai_configs` 行，拼上 API Key 转发上游，前端永远拿不到 Key。
+- 图生图 `/v1/images/edits` 支持两种 body：**首选 JSON `{ prompt, n, size?, quality?, references: ["img-xxx", ...] }`**（references 全是图床 storageKey），后端校验 owner 后从磁盘读图再 multipart 转发上游，请求体只有几百字节；**回落 multipart** 用于画布里截屏/裁剪还没存盘的瞬时图（前端 `requestEdit` 自动识别）。最多 8 张 references。
+- 提示词优化 `POST /api/prompts/improve` 在服务端硬编码 system prompt，前端永远拿不到内容；复用 chat 限流（5/min，admin 跳过）。
+- 上游 HTML 错误页（504/502/503）被 `handler.parseUpstreamMessage` / `service.parseUpstreamError` 转中文友好提示，前端不会展示 `<html>...` 原文。**用户可见文案中不要使用「上游」这种开发术语**，改成「服务器」「模型」「生图请求」。
+
+## 非显而易见的实现约定（先看，再写）
+
+- **生图两阶段入库**：点击「开始生成」立即 POST 一条 `status:running` 占位 generation，URL 切到 `/image/{id}`；所有 task 跑完后用同一个 `id` upsert 成 `success / partial / failed`。中途关页面 / 网络抖动也能在历史里看到这条调用，slot 显示「生成被中断，请点击重试」（语义不同于真实「生成失败」）。新的"调一次外部 API"流程都参考这套模式。
+- **跨 React 实例 race 防护**：长跑任务的「是否还在跑」判断**用 `useRef` 不要用 `useState`**。React 18 自动 batch + 路由切换 + setQueryData 之间可能让 `useEffect` closure 拿到 stale state；`isGeneratingRef` / `activeGenerationIdRef` 永远是最新值。本会话发起的 placeholder.id 也存 ref，避免被「这是别人的 running 占位」逻辑误刷成失败。
+- **图片上传统一走 `useImageUploader`**（`web/src/lib/use-image-uploader.ts`）：自动 loading toast、失败友好提示、413 中文化。所有触发上传的入口（按钮 / 粘贴 / 拖拽 / 剪切板 / 头像 / 参考图）都用它，不直接调 `uploadImage`。
+- **图片落库后的 URL**：`uploadImage` 返回的 `result.url` 是当前会话的 ObjectURL，**只能用于刚上传后的即时渲染**；要持久化（写入头像、参考图字段、`coverUrl` 等）一律存 `imageUrl(result.storageKey)`（= `/api/images/{id}`），否则刷新 / 换浏览器立刻 404。
+- **隐藏 `<input type="file">`**：在 antd Form 嵌套上下文里 `className="hidden"`（Tailwind）会被 Form 子元素 CSS 抢走特异性。**用 `style={{ display: "none" }} tabIndex={-1} aria-hidden`**。多槽位上传（如最多 N 张参考图）建议**共用一个隐藏 input**，靠 `slotIndexRef` 记目标槽位再 `.click()`，避免渲染多份原生 file UI。
+- **ID 前缀约定**：`service.newID("agent")`、`newID("gen")`、`newID("aic")` 等，按资源类型加前缀的短 ID；新表新建 ID 沿用这个 helper，不要直接 `uuid`。
+- **后端校验所有权**：所有 `/api/.../me` 接口先 `requireUser`，再 `repository.GetXxxByID` 后比对 `saved.UserID == user.ID`。普通用户用 admin 的 ID 越权访问直接返回中文错误，**没有 ownership 校验的 me 接口绝对不能 merge**。
+- **chat / improve 限流**：`service.AllowChat(user.ID)` 5/min，admin 跳过；做新「调上游文本模型」类接口时复用这个限流。
 
 ## 画布 UI 约束
 

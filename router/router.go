@@ -50,6 +50,30 @@ func New() *gin.Engine {
 	me.DELETE("/assets/me/:id", func(c *gin.Context) {
 		handler.DeleteMyAsset(c.Writer, c.Request, c.Param("id"))
 	})
+	me.GET("/agents/me", gin.WrapF(handler.MyAgents))
+	me.POST("/agents/me", gin.WrapF(handler.SaveMyAgent))
+	me.DELETE("/agents/me/:id", func(c *gin.Context) {
+		handler.DeleteMyAgent(c.Writer, c.Request, c.Param("id"))
+	})
+	me.GET("/pipelines/me", gin.WrapF(handler.MyPipelines))
+	me.POST("/pipelines/me", gin.WrapF(handler.SaveMyPipeline))
+	me.DELETE("/pipelines/me/:id", func(c *gin.Context) {
+		handler.DeleteMyPipeline(c.Writer, c.Request, c.Param("id"))
+	})
+	me.GET("/pipeline-runs/me", gin.WrapF(handler.MyPipelineRuns))
+	me.POST("/pipeline-runs/me", gin.WrapF(handler.CreateMyPipelineRun))
+	me.GET("/pipeline-runs/me/:id", func(c *gin.Context) {
+		handler.GetMyPipelineRun(c.Writer, c.Request, c.Param("id"))
+	})
+	me.PUT("/pipeline-runs/me/:id", func(c *gin.Context) {
+		handler.SaveMyPipelineRun(c.Writer, c.Request, c.Param("id"))
+	})
+	me.DELETE("/pipeline-runs/me/:id", func(c *gin.Context) {
+		handler.DeleteMyPipelineRun(c.Writer, c.Request, c.Param("id"))
+	})
+	me.GET("/pipeline-runs/me/:id/zip", func(c *gin.Context) {
+		handler.DownloadMyPipelineRunZip(c.Writer, c.Request, c.Param("id"))
+	})
 	me.POST("/prompts/improve", gin.WrapF(handler.ImprovePrompt))
 	me.POST("/prompts/submit", gin.WrapF(handler.SubmitPrompt))
 	me.POST("/images", gin.WrapF(handler.UploadImage))

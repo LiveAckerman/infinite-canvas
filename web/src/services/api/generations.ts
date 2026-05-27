@@ -26,6 +26,8 @@ export type GenerationRecord = {
   upstreamMeta?: string;
   // 微调来源：指向被微调的源 generation.id；为空表示原始生成
   parentId?: string;
+  // 角色工作台发起时记录所用角色 id；为空表示常规 /image 工作台或 canvas 发起。
+  agentId?: string;
   createdAt: string;
 };
 
@@ -37,6 +39,10 @@ export type GenerationListResponse = {
 export type GenerationQuery = {
   page?: number;
   pageSize?: number;
+  // 仅看指定 agent 的生成记录（角色工作台 Drawer 用）
+  agentId?: string;
+  // "1" → 只看「来自角色工作台」的记录（agent_id 非空）；与 agentId 同时存在时 agentId 生效
+  hasAgent?: string;
 };
 
 export type SaveGenerationPayload = {
@@ -57,6 +63,7 @@ export type SaveGenerationPayload = {
   requestParams?: Record<string, unknown>;
   upstreamMeta?: string;
   parentId?: string;
+  agentId?: string;
 };
 
 export async function fetchGenerations(token: string, query: GenerationQuery = {}) {

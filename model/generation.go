@@ -41,7 +41,10 @@ type Generation struct {
 	UpstreamMeta string `json:"upstreamMeta"`
 	// ParentID 指向被微调的源 generation.id；为空表示是原始生成。可用于 /image/{id} 详情
 	// 页面追溯「从哪张图微调出来的」以及统计 children。
-	ParentID  string `json:"parentId" gorm:"index"`
+	ParentID string `json:"parentId" gorm:"index"`
+	// AgentID 当这条 generation 是从「角色工作台」发起时，记录所用角色 id，
+	// 用于左侧记录列表 / admin 后台显示头像与名称、统计角色使用次数。为空表示常规调用。
+	AgentID   string `json:"agentId" gorm:"index"`
 	CreatedAt string `json:"createdAt"`
 }
 
