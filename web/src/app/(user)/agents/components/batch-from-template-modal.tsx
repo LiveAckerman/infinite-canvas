@@ -1,8 +1,8 @@
 "use client";
 
-import { ImagePlus, Play, X } from "lucide-react";
+import { ImagePlus, Play, Upload, X } from "lucide-react";
 import { App, Button, Input, Modal, Select, Tag, Typography } from "antd";
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent as ReactDragEvent } from "react";
 import { useMutation } from "@tanstack/react-query";
 
 import { useImageUploader } from "@/lib/use-image-uploader";
@@ -30,22 +30,28 @@ export function BatchFromTemplateModal({ open, onClose, onCreated, templates }: 
   const [templateId, setTemplateId] = useState<string>("");
   const [slots, setSlots] = useState<Slot[]>([]);
   const [batchName, setBatchName] = useState("");
+  const [dragHighlight, setDragHighlight] = useState(false);
+  const [bulkUploading, setBulkUploading] = useState(false);
 
-  // 当前操作的槽位下标（点 + 时记下来，再让隐藏 input.click()）
+  // 单槽位「替换」用：点 + 时记下来 index，input.click() 后 onChange 拿到 index 改单张
   const slotIndexRef = useRef<number>(-1);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  // 共两个隐藏 input：一个 multiple 全量上传，一个 single 单槽替换
+  const singleInputRef = useRef<HTMLInputElement>(null);
+  const multiInputRef = useRef<HTMLInputElement>(null);
 
   const selectedTemplate = useMemo(
     () => templates.find((template) => template.id === templateId) || null,
     [templates, templateId],
   );
 
-  // 切换 / 关闭时重置：把 slots 调成对应模板的长度
+  // 切换 / 关闭时重置
   useEffect(() => {
     if (!open) {
       setTemplateId("");
       setSlots([]);
       setBatchName("");
+      setBulkUploading(false);
+      setDragHighlight(false);
       slotIndexRef.current = -1;
       return;
     }
@@ -68,12 +74,13 @@ export function BatchFromTemplateModal({ open, onClose, onCreated, templates }: 
     });
   }, [selectedTemplate]);
 
+  // 单槽替换
   const triggerPickFor = (index: number) => {
     slotIndexRef.current = index;
-    fileInputRef.current?.click();
+    singleInputRef.current?.click();
   };
 
-  const handlePickFile = async (event: ChangeEvent<HTMLInputElement>) => {
+  const handlePickSingle = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
     const index = slotIndexRef.current;
@@ -97,6 +104,91 @@ export function BatchFromTemplateModal({ open, onClose, onCreated, templates }: 
     }
   };
 
+  // 批量上传 / 拖入：按上传顺序填到空槽位；如果选了 N 张但只有 M 个空槽（N > M），
+  // 仍按顺序填前 M 张，多余的 toast 警告。已经有图的槽位不动（用户手动点单槽 × 移除后再来）。
+  const assignFilesToEmptySlots = async (files: File[]) => {
+    if (!selectedTemplate) {
+      message.warning("请先选择批处理模板");
+      return;
+    }
+    const images = files.filter((f) => f.type.startsWith("image/"));
+    if (images.length === 0) {
+      if (files.length) message.error("没有有效的图片文件");
+      return;
+    }
+    const emptyIndices: number[] = [];
+    for (let i = 0; i < slots.length; i += 1) {
+      if (!slots[i].seedKey) emptyIndices.push(i);
+    }
+    if (emptyIndices.length === 0) {
+      message.warning("所有槽位都已上传，请先在某个槽位点 × 移除");
+      return;
+    }
+    const toUpload = images.slice(0, emptyIndices.length);
+    if (images.length > emptyIndices.length) {
+      message.warning(`只填了前 ${emptyIndices.length} 张到空槽位，剩余 ${images.length - emptyIndices.length} 张被忽略`);
+    }
+    setBulkUploading(true);
+    try {
+      const uploaded = await Promise.all(
+        toUpload.map(async (file) => {
+          try {
+            const stored = await uploadWithToast(file, { label: "原图" });
+            return { stored, file };
+          } catch {
+            return null;
+          }
+        }),
+      );
+      setSlots((prev) => {
+        const next = [...prev];
+        uploaded.forEach((result, i) => {
+          if (!result) return;
+          const slotIdx = emptyIndices[i];
+          if (slotIdx === undefined) return;
+          next[slotIdx] = {
+            seedKey: result.stored.storageKey,
+            seedUrl: result.stored.url,
+            fileName: result.file.name,
+          };
+        });
+        return next;
+      });
+    } finally {
+      setBulkUploading(false);
+    }
+  };
+
+  const triggerPickAll = () => {
+    multiInputRef.current?.click();
+  };
+
+  const handlePickMulti = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (files.length === 0) return;
+    await assignFilesToEmptySlots(files);
+  };
+
+  // 拖拽
+  const handleDragOver = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!selectedTemplate) return;
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setDragHighlight(true);
+  };
+  const handleDragLeave = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setDragHighlight(false);
+  };
+  const handleDrop = (event: ReactDragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDragHighlight(false);
+    const files = Array.from(event.dataTransfer.files || []);
+    void assignFilesToEmptySlots(files);
+  };
+
   const clearSlot = (index: number) => {
     setSlots((prev) => {
       const next = [...prev];
@@ -107,7 +199,12 @@ export function BatchFromTemplateModal({ open, onClose, onCreated, templates }: 
     });
   };
 
+  const clearAll = () => {
+    setSlots((prev) => prev.map(() => ({ seedKey: "", seedUrl: "", fileName: "" })));
+  };
+
   const allFilled = !!selectedTemplate && slots.length === selectedTemplate.itemCount && slots.every((slot) => slot.seedKey);
+  const filledCount = slots.filter((slot) => slot.seedKey).length;
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -147,7 +244,7 @@ export function BatchFromTemplateModal({ open, onClose, onCreated, templates }: 
     <Modal
       title="选择批处理模板"
       open={open}
-      width={680}
+      width={780}
       maskClosable={false}
       onCancel={onClose}
       footer={(
@@ -189,16 +286,12 @@ export function BatchFromTemplateModal({ open, onClose, onCreated, templates }: 
                 <div className="mb-2 text-xs font-semibold text-stone-600 dark:text-stone-300">模板预览</div>
                 <div className="flex flex-col gap-1 text-xs text-stone-600 dark:text-stone-300">
                   <div>主条数：{selectedTemplate.itemCount}</div>
-                  {selectedTemplate.items.map((entry, index) => {
-                    // 这里 templates 是父层传进来的，pipeline 名要让父层查；为简化前端，直接展示 pipelineId
-                    // 配合「失效检查由后端处理」的策略，UI 上不强制做命名解析
-                    return (
-                      <div key={`${entry.pipelineId}-${index}`} className="flex items-center gap-1">
-                        <span className="text-stone-400">主条 {index + 1}：</span>
-                        <span className="font-medium text-stone-700 dark:text-stone-200">{entry.name || `主条 ${index + 1}`}</span>
-                      </div>
-                    );
-                  })}
+                  {selectedTemplate.items.map((entry, index) => (
+                    <div key={`${entry.pipelineId}-${index}`} className="flex items-center gap-1">
+                      <span className="text-stone-400">主条 {index + 1}：</span>
+                      <span className="font-medium text-stone-700 dark:text-stone-200">{entry.name || `主条 ${index + 1}`}</span>
+                    </div>
+                  ))}
                   <div>
                     后处理：
                     {selectedTemplate.post ? (
@@ -233,14 +326,45 @@ export function BatchFromTemplateModal({ open, onClose, onCreated, templates }: 
 
             {selectedTemplate ? (
               <section>
-                <div className="mb-2 flex items-center justify-between">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                   <h4 className="text-sm font-semibold text-stone-700 dark:text-stone-200">
                     按顺序上传 {selectedTemplate.itemCount} 张图
                   </h4>
-                  <span className="text-xs text-stone-500">
-                    已上传 {slots.filter((slot) => slot.seedKey).length} / {selectedTemplate.itemCount}
-                  </span>
+                  <div className="flex items-center gap-2 text-xs text-stone-500">
+                    <span>已上传 {filledCount} / {selectedTemplate.itemCount}</span>
+                    {filledCount > 0 ? (
+                      <Button size="small" type="text" onClick={clearAll}>全部清空</Button>
+                    ) : null}
+                  </div>
                 </div>
+
+                {/* 批量上传 / 拖入区：可一次选多张 / 拖一组进来，按顺序填到空槽。 */}
+                <div
+                  className={`mb-3 flex flex-col items-center gap-1 rounded-md border-2 border-dashed p-3 text-center transition-colors ${dragHighlight ? "border-blue-500 bg-blue-50/40 dark:border-blue-400 dark:bg-blue-500/10" : "border-stone-300 dark:border-stone-700"}`}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                >
+                  <Upload className="size-5 text-stone-400" />
+                  <div className="text-xs text-stone-600 dark:text-stone-300">
+                    {dragHighlight
+                      ? `松开以填充剩余空槽位（最多 ${selectedTemplate.itemCount - filledCount} 张）`
+                      : `点「批量上传」或把图拖到这里，按顺序填到剩余空槽位`}
+                  </div>
+                  <div className="mt-1 flex gap-2">
+                    <Button
+                      size="small"
+                      icon={<Upload className="size-3.5" />}
+                      onClick={triggerPickAll}
+                      loading={bulkUploading}
+                      disabled={filledCount >= selectedTemplate.itemCount}
+                    >
+                      批量上传
+                    </Button>
+                  </div>
+                </div>
+
+                {/* 各槽位预览 */}
                 <div className="grid grid-cols-3 gap-3 sm:grid-cols-4">
                   {slots.map((slot, index) => {
                     const item = selectedTemplate.items[index];
@@ -275,14 +399,25 @@ export function BatchFromTemplateModal({ open, onClose, onCreated, templates }: 
                     );
                   })}
                 </div>
+                {/* 两个隐藏 input：multiple（批量）+ single（单槽替换） */}
                 <input
-                  ref={fileInputRef}
+                  ref={multiInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  style={{ display: "none" }}
+                  tabIndex={-1}
+                  aria-hidden
+                  onChange={(event) => void handlePickMulti(event)}
+                />
+                <input
+                  ref={singleInputRef}
                   type="file"
                   accept="image/*"
                   style={{ display: "none" }}
                   tabIndex={-1}
                   aria-hidden
-                  onChange={(event) => void handlePickFile(event)}
+                  onChange={(event) => void handlePickSingle(event)}
                 />
               </section>
             ) : null}

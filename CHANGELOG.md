@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.0.27 - 2026-05-28
+
++ [调整] **「流水线模式」Tab 不再显示批量任务里的 runs**：之前 `PipelineMode` 直接渲染 `RUNS_QUERY_KEY` 列表所有 runs，把批量任务里的 main / post runs 也混着列出来，列表又长又乱、还容易被用户误删。现在 `PipelineMode` 加一道前端过滤 `runs.filter(r => !r.batchId)`，只显示独立 run；批量任务里的 runs 全部归集到「批量任务」Tab 和详情页里。RUNS_QUERY_KEY cache 内容本身不动（调度器仍需要看到所有 runs），只在 UI 层过滤展示。
+
++ [修复] **批量任务调度器在 batch detail 页 / 「批量任务」Tab 时卡死**：用户「全部启动」后所有主条 status="queued"，但调度器订阅的是 `RUNS_QUERY_KEY = ["my-pipeline-runs"]` cache，而 batch detail 页只查 `["my-pipeline-batch", batchId]`，两份 cache 不互通。调度器拿不到 batch 里的 runs 数据 → 永远不会启动它们 → batch.status 显示「运行中」（按 main 有 queued 算）但页面上每条主条都显示「排队中」永远不动（实际跑表里查 db 也是 queued）。**修法**：① `app/(user)/agents/layout.tsx` 全局拉一次 `["my-pipeline-runs"]`（有活跃 run 时 3s polling），保证调度器永远有数据；② batch detail 页 `useEffect` 把 `detail.mainRuns + detail.postRuns` 同步合并进 `RUNS_QUERY_KEY` list cache，让调度器立刻看到最新状态触发调度。
++ [调整] **「从模板创建」Modal 支持批量上传 / 拖入**：之前只能一个槽位一张图逐个点 + 上传，不支持一次选 9 张图自动按顺序填到槽位。现在 `BatchFromTemplateModal` 顶部加「批量上传 / 拖入区」：① 点「批量上传」打开 `multiple=true` 文件选择器，一次选 N 张按顺序填到剩余空槽位（多余的 toast 警告丢弃）；② 直接拖一组图进上传区也走同样逻辑；③ 「全部清空」按钮一键清回空状态；④ 单槽位仍可单独点 + 上传 / × 移除。两个隐藏 input（multiple 批量 + single 单槽替换）共存避免冲突。
++ [调整] **批量任务详情页后处理一行 4 列 + 主条未完成时禁用并提示**：之前后处理 runs 是 `flex flex-col` 一列一卡，浪费宽屏空间且不直观。现在改成 `grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4` 响应式网格；主条阶段还没全部 done（哪怕一条还 idle/queued/running）时，整个 post 网格加 `opacity-60 pointer-events-none` 禁用 + 顶部一条琥珀色 banner「⏳ 正在等待主条阶段全部跑完，主条结束后这里才会自动开始」，让用户清楚后处理是被动等待的而非他们漏点了什么。
+
 ## v0.0.26 - 2026-05-28
 
 + [新增] 角色工作台新增「批量任务」：一次上传最多 9 张图，对所有图跑同一个流水线；跑完后可选「后处理」步骤，把多张产物再加工（例如统一上色、拼图、风格化）。

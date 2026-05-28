@@ -63,6 +63,22 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
   const detail = batchQuery.data;
   const status: PipelineBatchStatus | undefined = detail?.batch.status;
 
+  // batch detail polling 每次拿到新数据，把 mainRuns + postRuns 同步合并到 RUNS_QUERY_KEY list cache，
+  // 让调度器（usePipelineRunManager 订阅 list cache）能立刻看到这些 runs 并启动跑步骤。
+  // 不做的话用户停在 batch detail 页时，runs 一直 queued 不动（list cache 是空的）。
+  useEffect(() => {
+    if (!detail) return;
+    const batchRuns = [...detail.mainRuns, ...detail.postRuns];
+    if (batchRuns.length === 0) return;
+    queryClient.setQueryData<PipelineRunListResponse>(RUNS_QUERY_KEY, (old) => {
+      if (!old) return { items: batchRuns, total: batchRuns.length };
+      const map = new Map(old.items.map((r) => [r.id, r]));
+      for (const r of batchRuns) map.set(r.id, r);
+      const items = Array.from(map.values());
+      return { ...old, items, total: items.length };
+    });
+  }, [detail, queryClient]);
+
   // 首次进入 post_waiting 状态时自动拉一次 recheck-post 拿初始 missing 列表；
   // 之后 hideDecisionCard 状态切换不再重复触发；用户点「重新检查」会单独发请求。
   useEffect(() => {
@@ -259,6 +275,15 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
     const success = detail.postRuns.filter((run) => run.status === "success").length;
     const failed = detail.postRuns.filter((run) => run.status === "failed" || run.status === "partial").length;
     return { success, failed, total: detail.postRuns.length };
+  }, [detail]);
+
+  // 主条阶段是否全部 done（success/partial/failed 都算终态）；只要还有 idle/queued/running/paused/post_waiting 的就算未完成。
+  // post 卡片在主条未完成时禁用 + 加蒙层提示，让用户知道在等主条结束。
+  const isMainAllDone = useMemo(() => {
+    if (!detail || detail.mainRuns.length === 0) return false;
+    return detail.mainRuns.every(
+      (run) => run.status === "success" || run.status === "partial" || run.status === "failed",
+    );
   }, [detail]);
 
   if (batchQuery.isLoading) {
@@ -488,12 +513,23 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
               <Progress percent={postPercent} size="small" showInfo={false} className="!mb-0" />
             </div>
           </div>
+          {/* 主条未完成时，后处理卡整体禁用（pointer-events-none + 半透明），并加一行顶部提示 banner */}
+          {!isMainAllDone && detail.postRuns.length > 0 ? (
+            <div className="mb-3 flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300">
+              <span>⏳</span>
+              <span>正在等待主条阶段全部跑完，主条结束后这里才会自动开始</span>
+            </div>
+          ) : null}
           {detail.postRuns.length === 0 ? (
             <div className="rounded-lg border border-dashed border-stone-300 p-6 text-center text-sm text-stone-500 dark:border-stone-700">
               {isPostWaiting ? "等你决定后才会生成后处理 run" : "暂无后处理 run"}
             </div>
           ) : (
-            <div className="flex flex-col gap-3">
+            <div
+              className={`grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 ${!isMainAllDone ? "pointer-events-none opacity-60" : ""}`}
+              aria-disabled={!isMainAllDone}
+              title={!isMainAllDone ? "等待主条阶段完成" : undefined}
+            >
               {detail.postRuns.map((run) => (
                 <PipelineRunCard
                   key={run.id}

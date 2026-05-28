@@ -62,7 +62,12 @@ export function PipelineMode({ agents }: Props) {
       return hasActive ? 3000 : false;
     },
   });
-  const runs = runsQuery.data?.items || [];
+  // 流水线模式只显示「独立 run」（不属于任何 batch）。
+  // 批量任务里生成的 runs 在「批量任务」Tab 里看，混在这里会让列表变得很乱、容易误删。
+  const runs = useMemo(() => {
+    const all = runsQuery.data?.items || [];
+    return all.filter((run) => !run.batchId);
+  }, [runsQuery.data]);
 
   // 用上层 Provider 提供的单例调度器（cap=3）
   usePipelineRunManagerCtx();
