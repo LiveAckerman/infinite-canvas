@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## v0.0.21 - 2026-05-22
+
++ [新增] **`/image` 工作台参考图支持点击放大预览**：参考图横向列表里每张缩略图的 `<img>` 换成 antd `<Image>`，所有缩略图共享一个 `<Image.PreviewGroup>` —— 点击任意一张打开全屏预览，浮层里能左右切换浏览全部参考图、缩放、旋转、键盘 ←→。和 `frontend-design` skill 强调的「画布图片节点可点击放大」是同一套预览体验。拖动重排不受影响（PointerSensor 6px 距离阈值 + 整张缩略图仍是 drag handle）；X 删除按钮的 `pointerdown` 和 `click` 都 stopPropagation，所以点 × 不会被误识别成「点开预览」或「开始拖动」。
+
++ [新增] **并行模式工作区数据上云**：之前「加入工作区的角色 + 每张卡的原图 / 附加说明 / 产物 / 错误」要么在 localStorage（仅工作区角色列表），要么只在内存（卡片状态全丢），换设备 / 清浏览器就什么都没了。本次完整上云：
+  - **新表 `agent_workstation_cards`**：字段 `id / user_id / agent_id / position / reference_key / extra_note / output_key / status / error_message / duration_ms / 时间戳`，按 `(user_id, agent_id)` 唯一（每个角色在工作区里最多一张卡）。`status` 只入库 `idle / success / failed`，**running 不入库**（页面挂掉后 task 没法续跑，恢复时按 idle 渲染留个手动重做入口）。
+  - **CRUD 接口** `me.{GET,POST,DELETE} /api/agent-workstations/me[/:id]`：upsert 按 `(user_id, agent_id)` 自动认成 update 或 insert；reference_key / output_key 非空时强制 owner 校验；前端不区分 insert / update，都走 POST。
+  - **前端「加入 / 移出工作区」**：之前 `workspaceIds` 存 `localStorage:infinite-canvas:agents:workspace:{userId}`，现在改成 react-query 查 `/api/agent-workstations/me`；加入工作区 = POST 新建卡（`position = max+1, status=idle`），移出 = DELETE 卡。`workspaceIds` 从 Set 派生。**localStorage 的工作区列表 key 不再读不再写**，旧本地数据自然过期；按 AGENTS.md 项目期约定不写迁移。
+  - **AgentWorkstation 内部状态全部上云**：组件新增 `initialCard` + `onPersistCard` 两个 prop，mount 时从 server card hydrate 各 useState（reference / extraNote / status / result / errorMessage），关键时机调 onPersistCard 让父层 PUT 回库 —— ① 上传 / 移除原图 → 立即 PUT `referenceKey`；② 改附加说明 → **debounce 800ms** PUT `extraNote`（避免连打字每个字符一次请求）；③ 生成成功 / 失败 → 立即 PUT `status + outputKey + errorMessage + durationMs`；④ 点「再来一张」重置 → PUT 把这 4 个字段都清回 idle。
+  - **跨设备验证**：A 浏览器加几个角色到工作区、给每张卡上传原图、跑出产物，再到 B 浏览器登录同账号进 `/agents`，工作区应该原样恢复（同一批角色卡 + 上次的原图缩略 + 附加说明 + 上次的产物图）。第一次 mount 会有 ~300ms 的 list 拉取 loading，之后操作都是乐观更新 + 后台 PUT。
+  - **越权防护**：所有接口都用 `requireUser` + `ownership check`；service 校验 `agent.UserID == user.ID` 才允许写，`reference_key / output_key` 非本人图片直接报错。
+
 ## v0.0.20 - 2026-05-22
 
 + [新增] **流水线列表卡支持「重新执行」**：之前「执行 / 多选执行 / 全部执行」只对「待执行（paused + 有 seed）」状态生效，导致已完成 / 失败的 run 想再跑一次只能去详情页点「全部重跑」。现在 list 卡的「eligible」语义扩展为「有 seed 且不在跑」—— 涵盖 paused / success / partial / failed 四种状态：

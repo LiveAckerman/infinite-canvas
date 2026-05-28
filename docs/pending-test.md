@@ -101,6 +101,13 @@
   - 鼠标按住缩略图后**不应**出现浏览器原生「半透明拖图标到地址栏 / 文件管理器」效果（img 已设 `draggable={false}`）。
   - 只剩 1 张参考图时，DnD 容器仍然渲染但拖动无意义；不会报错。
   - 触屏 / 移动端：在缩略图上 long-press 后水平拖动也能 reorder（PointerSensor 支持 touch）。
+- `/image` 参考图点击放大预览：
+  - 在生图工作台上传 2-3 张参考图后，**点击**（mousedown + mouseup 在同一位置，不移动）任意一张缩略图 → 应该弹出 antd 全屏预览浮层，可缩放、旋转。
+  - 浮层右上角 / 左右两侧能看到上一张 / 下一张箭头按钮（`Image.PreviewGroup` 串起来），点击可在所有参考图间切换；键盘 ←→ 也能切换。
+  - hover 缩略图时左上角出现「放大查看」蒙层文字（antd Image 的 `mask` prop）。
+  - **拖动重排仍可用**：在缩略图上按住 + 水平拖动 ≥ 6px → 触发 reorder（不会进预览模式）；纯点击（不拖）→ 进预览（不会被识别成拖）。
+  - **点 × 删除按钮不会触发预览**：悬浮露出右上角 × 后点击 → 该张被删除，**不会**有预览浮层弹出来（X 按钮的 pointerdown + click 都 stopPropagation）。
+  - 预览浮层关闭后回到工作台，参考图列表 / 顺序 / 选中状态都不变。
 - 角色工作台「生成记录」Drawer：
   - 在 `/agents` 工作区标题旁能看到「生成记录」按钮（带 History 时钟图标），点击从右侧弹出 520px Drawer，标题旁显示符合条件的总数 Tag。
   - 默认筛选「全部本工作台」：Drawer 列表只显示从 `/agents` 工作台发出的记录（带 `agentId`），**不**应混进 `/image` 或画布发的记录。先在 `/image` 跑一张图、再在 `/agents` 跑一张图，对比两边记录列表只看到自己的。
@@ -259,3 +266,20 @@
   - 多选 + 全部执行：勾上 1 条 success + 2 条 paused → 顶部「执行选中（3）」可点；点了 3 条都进 queued 重新跑。批量工具栏下方应出现一行提示文案「包含「待执行」「已完成」「失败」的流程；点了会清掉旧产物从第 1 步重新跑。想保留旧结果请改用「复制」」让用户知道这是清产物操作。
   - 「复制」按钮仍然走「同模板 + 空 seed」语义，不会动原 run 的产物——确认复制后看原 run 缩略图、状态都不变。
   - 越权防护：用户 B 拿 A 的 run id 调 PUT 应被拒绝（saved.UserID != B）。
+- 并行模式工作区跨设备同步：
+  - 浏览器 A 登录账号 X，进 `/agents`「并行模式」，把 3 个角色加入工作区，给其中 2 张卡上传原图，给 1 张卡写附加说明「保留原始光影」，跑出 1 张产物图。
+  - 浏览器 B（或换设备）登录同账号 X 进 `/agents`「并行模式」，应该看到：① 同样 3 张卡片按相同顺序排列；② 之前上传过原图的 2 张仍显示原图缩略；③ 写过附加说明的那张 textarea 仍有「保留原始光影」；④ 跑出产物的那张 status pill = 已完成、产物图能看到。第一次 mount 会有几百 ms 的 loading（等 `/api/agent-workstations/me` 拉回来）。
+  - 在 B 上对其中一张点「再来一张」重置 → 卡片回 idle 态，产物图消失；回 A 浏览器刷新页面，A 这张卡也应该是 idle（数据已同步）。
+  - 切到不同账号 Y 登录 → 工作区应该是 Y 自己的（不会看到 X 的）。再切回 X → 还是 X 的工作区原样。
+  - 操作链路验证：
+    - 加入工作区 = POST 一条 card；
+    - 移出工作区 = DELETE 这条 card；
+    - 上传原图 / 移除原图 = POST upsert（带 referenceKey）；
+    - 写附加说明 = POST upsert（停打字 800ms 后才请求，连续打字不会触发一堆 PUT）；
+    - 生成成功 / 失败 / 重置 = POST upsert（带 status + outputKey / errorMessage / durationMs）。
+    - DevTools Network 看 `/api/agent-workstations/me` 的 POST 频率应该合理（textarea 连打不会一字符一请求）。
+  - 越权防护：
+    - 用账号 X 的 token 调 `POST /api/agent-workstations/me` 传 `agentId` = 账号 Y 的某角色 id，应返回「角色不存在」。
+    - 传 `referenceKey` 或 `outputKey` 是别人的图，应返回「原图无权访问或不存在 / 产物图无权访问或不存在」。
+    - 用 X 的 token DELETE 一条 Y 的 card id，应返回「卡片不存在」。
+  - 旧 localStorage 数据：之前在 localStorage 里存的 `infinite-canvas:agents:workspace:{userId}` 不再被读，工作区从 server 拉取的列表为准；旧 localStorage 数据 / 工作区在线上残留无影响（按项目期约定不写迁移）。

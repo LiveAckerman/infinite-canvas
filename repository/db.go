@@ -54,6 +54,7 @@ func DB() (*gorm.DB, error) {
 			&model.CreditLog{},
 			&model.Image{},
 			&model.Agent{},
+			&model.AgentWorkstationCard{},
 			&model.Pipeline{},
 			&model.PipelineRun{},
 		)

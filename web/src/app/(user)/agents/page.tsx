@@ -7,12 +7,19 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { RequireAuth } from "@/components/require-auth";
 import { deleteMyAgent, fetchMyAgents, saveMyAgent, type Agent, type AgentListResponse } from "@/services/api/agents";
+import {
+  deleteMyAgentWorkstationCard,
+  fetchMyAgentWorkstationCards,
+  saveMyAgentWorkstationCard,
+  type AgentWorkstationCard,
+  type AgentWorkstationCardListResponse,
+} from "@/services/api/agent-workstations";
 import { useUserStore } from "@/stores/use-user-store";
 
 import { AgentEditModal, type AgentFormValues } from "./components/agent-edit-modal";
 import { AgentLibraryCard } from "./components/agent-library-card";
 import { AgentRecordsDrawer } from "./components/agent-records-drawer";
-import { AgentWorkstation } from "./components/agent-workstation";
+import { AgentWorkstation, type WorkstationCardPatch } from "./components/agent-workstation";
 import { PipelineMode } from "./components/pipeline-mode";
 
 // 「并行 / 流水线」模式偏好，localStorage 持久化（轻量偏好不上云）。
@@ -23,26 +30,9 @@ function loadMode(): WorkbenchMode {
   return window.localStorage.getItem(MODE_STORAGE_KEY) === "pipeline" ? "pipeline" : "parallel";
 }
 
-const AGENTS_QUERY_KEY = ["my-agents"] as const;
+const WORKSTATION_CARDS_QUERY_KEY = ["my-workstation-cards"] as const;
 
-// 工作区里加入了哪些角色 id 按用户隔离存 localStorage，刷新 / 重开浏览器都能恢复。
-// 不上云：工作区是「当前会话偏好」性质，跨设备同步意义不大；后续要上云再加。
-const WORKSPACE_STORAGE_KEY_PREFIX = "infinite-canvas:agents:workspace";
-function storageKeyForUser(userId: string) {
-  return `${WORKSPACE_STORAGE_KEY_PREFIX}:${userId}`;
-}
-function loadWorkspaceIds(userId: string): string[] {
-  if (typeof window === "undefined" || !userId) return [];
-  try {
-    const raw = window.localStorage.getItem(storageKeyForUser(userId));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((id): id is string => typeof id === "string");
-  } catch {
-    return [];
-  }
-}
+const AGENTS_QUERY_KEY = ["my-agents"] as const;
 
 export default function AgentsPage() {
   return (
@@ -62,36 +52,16 @@ function AgentsWorkbench() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [deletingAgent, setDeletingAgent] = useState<Agent | null>(null);
   // 「生成记录」Drawer：开关 + 角色筛选 + 分页页码 + refreshKey（workstation 跑完一次 bump）。
-  // 这些状态放在 page 层，让 Drawer 关掉再打开能恢复用户上次的筛选和翻页位置。
   const [recordsOpen, setRecordsOpen] = useState(false);
   const [recordsAgentFilter, setRecordsAgentFilter] = useState<string>("");
   const [recordsPage, setRecordsPage] = useState(1);
   const [recordsRefreshKey, setRecordsRefreshKey] = useState(0);
-  // 工作区是一份独立的 agent.id 列表；list 接口拉到的角色只是「库」，加入工作区才进 grid。
-  // 按用户隔离持久化到 localStorage，刷新 / 重开浏览器都能恢复用户上次摆放的工作区。
-  const [workspaceIds, setWorkspaceIds] = useState<string[]>(() => loadWorkspaceIds(userId));
-  // 顶部模式：并行 vs 流水线。localStorage 持久化，与 workspaceIds 互不影响。
+  // 顶部模式：并行 vs 流水线。localStorage 持久化。
   const [mode, setMode] = useState<WorkbenchMode>(() => loadMode());
   useEffect(() => {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(MODE_STORAGE_KEY, mode);
   }, [mode]);
-
-  // userId 切换（登录 / 切账号）时把工作区切回新账号的快照；
-  // 没登录或新账号没保存过就是空数组。
-  useEffect(() => {
-    setWorkspaceIds(loadWorkspaceIds(userId));
-  }, [userId]);
-
-  // workspaceIds 任何变更都写回 localStorage（仅有用户时；guest 不写）。
-  useEffect(() => {
-    if (typeof window === "undefined" || !userId) return;
-    try {
-      window.localStorage.setItem(storageKeyForUser(userId), JSON.stringify(workspaceIds));
-    } catch {
-      // QuotaExceeded 等极端情况直接忽略，不打扰生成流程
-    }
-  }, [userId, workspaceIds]);
 
   const agentsQuery = useQuery({
     queryKey: AGENTS_QUERY_KEY,
@@ -121,10 +91,56 @@ function AgentsWorkbench() {
         if (!old) return old;
         return { ...old, items: old.items.filter((item) => item.id !== id), total: Math.max(0, old.total - 1) };
       });
-      setWorkspaceIds((value) => value.filter((wid) => wid !== id));
+      // 角色被删的时候顺手把工作区里引用它的卡也清掉（前端缓存层面）。
+      // 后端那条记录会变成「孤儿卡」，但 list 接口里因为角色不存在 UI 显示不出名字，
+      // 用户体验上等价于消失。后续重启 backend 时可以加个清理任务，但项目期不做。
+      queryClient.setQueryData<AgentWorkstationCardListResponse>(WORKSTATION_CARDS_QUERY_KEY, (old) => {
+        if (!old) return old;
+        const items = old.items.filter((card) => card.agentId !== id);
+        return { items, total: items.length };
+      });
     },
     onError: (error) => {
       message.error(error instanceof Error ? error.message : "删除失败");
+    },
+  });
+
+  // 工作区卡片 query：跨设备同步的来源。token 切换（登录 / 切账号）会自动 refetch 新账号的卡片。
+  const cardsQuery = useQuery({
+    queryKey: WORKSTATION_CARDS_QUERY_KEY,
+    queryFn: () => fetchMyAgentWorkstationCards(token),
+    enabled: Boolean(token),
+  });
+
+  // upsert：「加入工作区」「上传 reference」「写附加说明」「跑完成功 / 失败」「重置」都走这一个 POST。
+  // 父层根据返回结果把新数据写进 query cache，AgentWorkstation 不重新 mount（不会丢内部正在跑的 state）。
+  const persistCardMutation = useMutation({
+    mutationFn: (card: Partial<AgentWorkstationCard>) => saveMyAgentWorkstationCard(token, card),
+    onSuccess: (saved) => {
+      queryClient.setQueryData<AgentWorkstationCardListResponse>(WORKSTATION_CARDS_QUERY_KEY, (old) => {
+        if (!old) return { items: [saved], total: 1 };
+        const exists = old.items.some((item) => item.id === saved.id || (item.agentId === saved.agentId && item.userId === saved.userId));
+        if (exists) {
+          return { ...old, items: old.items.map((item) => (item.id === saved.id || (item.agentId === saved.agentId && item.userId === saved.userId) ? saved : item)) };
+        }
+        return { ...old, items: [...old.items, saved], total: old.total + 1 };
+      });
+    },
+    onError: (error) => {
+      message.error(error instanceof Error ? error.message : "工作区状态保存失败");
+    },
+  });
+
+  const deleteCardMutation = useMutation({
+    mutationFn: (cardId: string) => deleteMyAgentWorkstationCard(token, cardId),
+    onSuccess: (_, cardId) => {
+      queryClient.setQueryData<AgentWorkstationCardListResponse>(WORKSTATION_CARDS_QUERY_KEY, (old) => {
+        if (!old) return old;
+        return { ...old, items: old.items.filter((item) => item.id !== cardId), total: Math.max(0, old.total - 1) };
+      });
+    },
+    onError: (error) => {
+      message.error(error instanceof Error ? error.message : "移出工作区失败");
     },
   });
 
@@ -139,17 +155,44 @@ function AgentsWorkbench() {
     ));
   }, [agents, keyword]);
 
+  const cards = cardsQuery.data?.items || [];
+  const cardsByAgentId = useMemo(() => {
+    const map = new Map<string, AgentWorkstationCard>();
+    for (const card of cards) map.set(card.agentId, card);
+    return map;
+  }, [cards]);
+  // 工作区角色列表 = 有 card 且角色仍存在的；按 position asc 排（跟后端 list 顺序对齐）。
   const workspaceAgents = useMemo(() => {
-    // 工作区按用户加入的顺序展示；列表里被删除的角色也要从工作区里剔掉
-    return workspaceIds.map((id) => agents.find((agent) => agent.id === id)).filter((agent): agent is Agent => Boolean(agent));
-  }, [agents, workspaceIds]);
+    return [...cards]
+      .sort((a, b) => (a.position || 0) - (b.position || 0))
+      .map((card) => agents.find((agent) => agent.id === card.agentId))
+      .filter((agent): agent is Agent => Boolean(agent));
+  }, [agents, cards]);
+  const workspaceIds = useMemo(() => new Set(cards.map((card) => card.agentId)), [cards]);
 
+  // 「加入工作区」：POST 一条新的卡片，position 取当前最大值 +1。
   const addToWorkspace = (agent: Agent) => {
-    setWorkspaceIds((value) => value.includes(agent.id) ? value : [...value, agent.id]);
+    if (workspaceIds.has(agent.id)) return; // 已在工作区
+    const maxPosition = cards.reduce((max, card) => Math.max(max, card.position || 0), 0);
+    persistCardMutation.mutate({ agentId: agent.id, position: maxPosition + 1, status: "idle" });
   };
 
-  const removeFromWorkspace = (id: string) => {
-    setWorkspaceIds((value) => value.filter((wid) => wid !== id));
+  // 「移出工作区」：按 agent.id 找到 card 删掉。
+  const removeFromWorkspace = (agentId: string) => {
+    const card = cardsByAgentId.get(agentId);
+    if (!card) return;
+    deleteCardMutation.mutate(card.id);
+  };
+
+  // AgentWorkstation 内部状态变更时由它调过来，父层 PUT 回数据库。
+  // patch 里只有变化的字段；agentId / position 由父层补齐。
+  const persistCardPatch = (agentId: string, patch: WorkstationCardPatch) => {
+    const existing = cardsByAgentId.get(agentId);
+    if (!existing) return; // 理论上不该到这里（卡都没有就不该有 onPersistCard 触发）
+    persistCardMutation.mutate({
+      ...existing,
+      ...patch,
+    });
   };
 
   const handleEdit = (agent: Agent | null) => {
@@ -238,7 +281,7 @@ function AgentsWorkbench() {
             <AgentLibraryCard
               key={agent.id}
               agent={agent}
-              inWorkspace={workspaceIds.includes(agent.id)}
+              inWorkspace={workspaceIds.has(agent.id)}
               onAddToWorkspace={() => addToWorkspace(agent)}
               onEdit={() => handleEdit(agent)}
               onDuplicate={() => void handleDuplicate(agent)}
@@ -284,6 +327,8 @@ function AgentsWorkbench() {
             <AgentWorkstation
               key={agent.id}
               agent={agent}
+              initialCard={cardsByAgentId.get(agent.id) || null}
+              onPersistCard={(patch) => persistCardPatch(agent.id, patch)}
               onRemove={() => removeFromWorkspace(agent.id)}
               onEdit={() => handleEdit(agent)}
               onUsed={() => {

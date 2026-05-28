@@ -8,6 +8,7 @@ import { defaultConfig } from "@/lib/ai-config";
 import { createId } from "@/lib/id";
 import { formatDuration, readImageMeta } from "@/lib/image-utils";
 import { useImageUploader } from "@/lib/use-image-uploader";
+import type { AgentWorkstationCard } from "@/services/api/agent-workstations";
 import { saveGeneration } from "@/services/api/generations";
 import { requestEdit, requestGeneration, type GeneratedImage as GeneratedImagePayload } from "@/services/api/image";
 import { saveMyAsset } from "@/services/api/my-assets";
@@ -29,6 +30,17 @@ type WorkstationResult = {
   durationMs: number;
 };
 
+// 父层 PUT 写回数据库的 patch payload。referenceKey / outputKey / errorMessage 用空串显式清空。
+// status: 'running' 不入库（页面挂掉后没法续跑，恢复时全部按 idle）。
+export type WorkstationCardPatch = {
+  referenceKey?: string;
+  extraNote?: string;
+  outputKey?: string;
+  status?: "idle" | "success" | "failed";
+  errorMessage?: string;
+  durationMs?: number;
+};
+
 type AgentWorkstationProps = {
   agent: Agent;
   onRemove: () => void;
@@ -37,31 +49,79 @@ type AgentWorkstationProps = {
   onUsed: () => void;
   // 生成完成（无论成功失败）通知父层，让 records drawer 刷新列表。
   onGenerationSaved?: () => void;
+  // 从服务端拉到的卡片状态，mount 时用来 hydrate 内部 useState（reference / extraNote / status / result）。
+  // 不传或 null 表示这是新加入工作区的空卡（理论上应当极少出现，因为加入即建卡）。
+  initialCard?: AgentWorkstationCard | null;
+  // 关键状态变更时由父层 PUT 回 /api/agent-workstations/me。extraNote 内部 debounce 800ms。
+  // 父层基于 (userId, agentId) upsert，前端无需关心是 insert 还是 update。
+  onPersistCard?: (patch: WorkstationCardPatch) => void;
 };
 
 // 一个角色独占一个工作台卡片：自己的 reference / extra prompt / 状态 / 结果，完全独立。
 // 直接复用 /image 工作台的 requestEdit / requestGeneration，区别只在于：
 //   - 不让用户写 prompt，由 agent.systemPrompt 替代；
 //   - 可选「附加说明」会附加在 systemPrompt 后面（用换行隔开），覆盖角色细节。
-export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGenerationSaved }: AgentWorkstationProps) {
+export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGenerationSaved, initialCard, onPersistCard }: AgentWorkstationProps) {
   const { message } = App.useApp();
   const token = useUserStore((state) => state.token);
   const uploadWithToast = useImageUploader();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [reference, setReference] = useState<ReferenceImage | null>(null);
-  const [extraNote, setExtraNote] = useState("");
-  const [status, setStatus] = useState<WorkstationStatus>("idle");
-  const [errorMessage, setErrorMessage] = useState("");
-  const [result, setResult] = useState<WorkstationResult | null>(null);
+  // mount 时从 initialCard hydrate 各内部状态。后续直接走本地 setState + onPersistCard，
+  // 不再监听 initialCard 的变化（避免父层缓存刷新触发的 hydrate 把用户当前输入回滚）。
+  const [reference, setReference] = useState<ReferenceImage | null>(() => {
+    if (!initialCard?.referenceKey) return null;
+    return {
+      id: `restored-ref-${initialCard.referenceKey}`,
+      name: "原图",
+      type: "image/*",
+      dataUrl: imageUrl(initialCard.referenceKey),
+      storageKey: initialCard.referenceKey,
+    };
+  });
+  const [extraNote, setExtraNote] = useState(initialCard?.extraNote || "");
+  // server 端的 running 不入库，恢复时全部按 idle 渲染
+  const [status, setStatus] = useState<WorkstationStatus>(
+    initialCard?.status === "success" ? "success"
+    : initialCard?.status === "failed" ? "failed"
+    : "idle",
+  );
+  const [errorMessage, setErrorMessage] = useState(initialCard?.errorMessage || "");
+  const [result, setResult] = useState<WorkstationResult | null>(() => {
+    if (!initialCard?.outputKey) return null;
+    return {
+      id: `restored-output-${initialCard.outputKey}`,
+      url: imageUrl(initialCard.outputKey),
+      storageKey: initialCard.outputKey,
+      width: 0,
+      height: 0,
+      durationMs: initialCard.durationMs || 0,
+    };
+  });
   const [dragHighlight, setDragHighlight] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
   const startedAtRef = useRef(0);
+  // extraNote 防抖 PUT 计时器
+  const extraNotePersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (status !== "running") return;
     const timer = window.setInterval(() => setElapsedMs(performance.now() - startedAtRef.current), 500);
     return () => window.clearInterval(timer);
   }, [status]);
+
+  // 卸载时清理 extraNote 防抖计时器，避免组件销毁后还 PUT 一次。
+  useEffect(() => () => {
+    if (extraNotePersistTimerRef.current) clearTimeout(extraNotePersistTimerRef.current);
+  }, []);
+
+  // 修改附加说明：本地立即更新；800ms 防抖后才 PUT 回库，避免连打字每个字符一次请求。
+  const handleExtraNoteChange = (next: string) => {
+    setExtraNote(next);
+    if (extraNotePersistTimerRef.current) clearTimeout(extraNotePersistTimerRef.current);
+    extraNotePersistTimerRef.current = setTimeout(() => {
+      onPersistCard?.({ extraNote: next });
+    }, 800);
+  };
 
   const handleFilePick = async (file?: File | null) => {
     if (!file) return;
@@ -72,9 +132,16 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
     try {
       const stored = await uploadWithToast(file, { label: "原图" });
       setReference({ id: createId(), name: file.name, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey });
+      onPersistCard?.({ referenceKey: stored.storageKey });
     } catch {
       // useImageUploader 已经弹错误
     }
+  };
+
+  // 用户点 X 移除当前原图：本地清掉 + 后端把 referenceKey 清空。
+  const handleRemoveReference = () => {
+    setReference(null);
+    onPersistCard?.({ referenceKey: "" });
   };
 
   const handlePaste = (event: ReactClipboardEvent<HTMLDivElement>) => {
@@ -201,6 +268,13 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
       });
       setStatus("success");
       onUsed();
+      // 把结果 PUT 到 workstation_cards，下次进同账号能直接看到这张产物图。
+      onPersistCard?.({
+        status: "success",
+        outputKey: stored.storageKey,
+        errorMessage: "",
+        durationMs: Math.round(durationMs),
+      });
       // 落一条 generations 记录，让「生成记录」Drawer 看得到；带 agentId 方便按角色筛选。
       // 失败不阻断主流程，弹消息即可。
       saveGeneration(token, {
@@ -227,6 +301,13 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
       const msg = error instanceof Error ? error.message : "生成失败";
       setErrorMessage(msg);
       setStatus("failed");
+      // 同步把 failed 状态 + 错误信息推到 workstation_cards，下次进可以看到上次失败原因，方便重试。
+      onPersistCard?.({
+        status: "failed",
+        errorMessage: msg,
+        outputKey: "",
+        durationMs: Math.round(performance.now() - startedAtRef.current),
+      });
       // 失败也写一条记录，方便 Drawer 里复盘错误。
       saveGeneration(token, {
         prompt: composedPrompt,
@@ -282,6 +363,14 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
     setResult(null);
     setErrorMessage("");
     setElapsedMs(0);
+    // 把 outputKey / errorMessage / durationMs / status 都重置回 idle，
+    // 下次进卡片就是干净的「待生成」状态。reference / extraNote 保留不动。
+    onPersistCard?.({
+      status: "idle",
+      outputKey: "",
+      errorMessage: "",
+      durationMs: 0,
+    });
   };
 
   const statusPill = (() => {
@@ -341,7 +430,7 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
             <button
               type="button"
               className="absolute right-1 top-1 grid size-6 place-items-center rounded bg-black/60 text-white hover:bg-black/80"
-              onClick={() => setReference(null)}
+              onClick={handleRemoveReference}
               aria-label="移除原图"
             >
               <X className="size-3.5" />
@@ -374,7 +463,7 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
 
       <Input.TextArea
         value={extraNote}
-        onChange={(event) => setExtraNote(event.target.value)}
+        onChange={(event) => handleExtraNoteChange(event.target.value)}
         placeholder="附加说明（可选）—— 会拼到角色的系统提示词后面，例如：保留原始光影、背景换成纯白"
         rows={2}
         disabled={status === "running"}

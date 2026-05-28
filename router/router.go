@@ -55,6 +55,11 @@ func New() *gin.Engine {
 	me.DELETE("/agents/me/:id", func(c *gin.Context) {
 		handler.DeleteMyAgent(c.Writer, c.Request, c.Param("id"))
 	})
+	me.GET("/agent-workstations/me", gin.WrapF(handler.MyAgentWorkstationCards))
+	me.POST("/agent-workstations/me", gin.WrapF(handler.SaveMyAgentWorkstationCard))
+	me.DELETE("/agent-workstations/me/:id", func(c *gin.Context) {
+		handler.DeleteMyAgentWorkstationCard(c.Writer, c.Request, c.Param("id"))
+	})
 	me.GET("/pipelines/me", gin.WrapF(handler.MyPipelines))
 	me.POST("/pipelines/me", gin.WrapF(handler.SaveMyPipeline))
 	me.DELETE("/pipelines/me/:id", func(c *gin.Context) {

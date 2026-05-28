@@ -823,13 +823,16 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
                     {references.length ? (
                       <DndContext sensors={referenceSensors} collisionDetection={closestCenter} onDragEnd={handleReferenceReorder}>
                         <SortableContext items={references.map((ref) => ref.id)} strategy={horizontalListSortingStrategy}>
-                          {references.map((item) => (
-                            <SortableReferenceThumb
-                              key={item.id}
-                              item={item}
-                              onRemove={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))}
-                            />
-                          ))}
+                          {/* 包一层 PreviewGroup，参考图打开预览后可左右切换浏览全部 */}
+                          <Image.PreviewGroup>
+                            {references.map((item) => (
+                              <SortableReferenceThumb
+                                key={item.id}
+                                item={item}
+                                onRemove={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))}
+                              />
+                            ))}
+                          </Image.PreviewGroup>
                         </SortableContext>
                       </DndContext>
                     ) : (
@@ -923,10 +926,11 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
   );
 }
 
-// SortableReferenceThumb 一张参考图缩略图，整张可拖动重排（dnd-kit）。
-//   - 触发距离 6px 才识别为拖动，避免点 × 删除时误触；
-//   - X 按钮的 pointerdown / click 都 stopPropagation，drag 不抢手势；
-//   - <img draggable={false}> 阻止浏览器原生「把图片拖到地址栏 / 另存为」的副作用，
+// SortableReferenceThumb 一张参考图缩略图，整张可拖动重排（dnd-kit），
+// 同时**点击图片**会打开 antd 预览浮层（外层 Image.PreviewGroup 提供左右切换）。
+//   - 触发距离 6px 才识别为拖动，避免点 × 删除 / 点图预览时误触；
+//   - X 按钮的 pointerdown / click 都 stopPropagation，drag 不抢手势、也不会触发预览；
+//   - <Image draggable={false}> 阻止浏览器原生「把图片拖到地址栏 / 另存为」的副作用，
 //     否则会和 dnd-kit 的 pointer 拖动起冲突，鼠标按下立刻变成"拖图标"。
 function SortableReferenceThumb({ item, onRemove }: { item: ReferenceImage; onRemove: () => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: item.id });
@@ -943,12 +947,21 @@ function SortableReferenceThumb({ item, onRemove }: { item: ReferenceImage; onRe
       {...attributes}
       {...listeners}
       className="group relative size-20 shrink-0 cursor-grab touch-none select-none overflow-hidden rounded-md border border-stone-200 active:cursor-grabbing dark:border-stone-800"
-      title="拖动可调整参考图顺序"
+      title="点击放大查看，按住拖动调整顺序"
     >
-      <img src={item.dataUrl} alt={item.name} className="pointer-events-none size-full object-cover" draggable={false} />
+      <Image
+        src={item.dataUrl}
+        alt={item.name}
+        width={80}
+        height={80}
+        className="!size-20 object-cover"
+        rootClassName="!block !size-20"
+        preview={{ mask: "放大查看" }}
+        draggable={false}
+      />
       <button
         type="button"
-        className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
+        className="absolute right-1 top-1 z-10 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => {
           event.stopPropagation();
