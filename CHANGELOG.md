@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.0.31 - 2026-05-28
+
++ [新增] **全局路由跳转进度条**：用户点顶部菜单 / 任何 `<Link>` 跳路由时，原来会卡 1-2 秒没反馈（Next.js App Router 默认拉数据 + 渲染时是「静默等待」），用户以为系统挂了。现在装了 `nextjs-toploader` 在根 layout 挂了 `<NextTopLoader>`，路由切换瞬间顶部出一条蓝色细进度条（高度 3px，颜色 `#1677ff` 跟 antd primary 一致，带浅蓝色发光阴影），跳完自动消失。不影响任何业务逻辑，纯 UX 改善。`showSpinner=false` 避免右上角小转圈干扰。
+
 ## v0.0.30 - 2026-05-28
 
 + [修复] **批量任务的后处理 run 不应要求用户再上传原图，应该直接用配置好的 sources**：之前 batch detail 页里 post run 卡复用 `PipelineRunCard`，那个组件假设 single-seed 语义，看到 `run.seedKey===""` 直接进「待上传原图」UI，让用户用「上传 / 剪切板」按钮再传一次图 —— 但 post run 的输入本来就是用户在 BatchCreateModal 里配置好的 sources（指向同批 main runs 的 step 产物 / seed），runner 跑时已经会自动用 `resolvePostSourceKeys` 解析这些产物喂上游。前端 UI 完全错位。**修法**：batch detail 页内联一个专用的 `PostRunCard` 组件，跟 `PipelineRunCard` 不复用：① 标题区显示「后处理 · {角色名}」+ 状态 pill（不再有「待上传原图」状态，post run 永远不需要 seed）；② 中部显示「数据源 N 张」+ 横排叠放的小缩略图（最多 8 张，从 sourceRefs 实时解析主条产物得到）；③ 产物区显示成功后的输出图 / 失败时显示错误信息；④ 操作按钮区只有「打开详情」+ failed/paused 时的「重做」（带 RefreshCw 图标）。
