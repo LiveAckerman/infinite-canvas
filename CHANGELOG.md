@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v0.0.28 - 2026-05-28
+
++ [修复] **批量任务的后处理 run 偶发性「角色不存在或已被删除」误判失败**：`use-pipeline-run-manager.ts` 里 `runRun` / `runSingleStep` 都用 closure 里的 `agents` 数组找 agent，但 `agents` 来自 layout 的 `useQuery({ queryKey: ["my-agents"] })`。layout 还同时拉了 `["my-pipeline-runs"]`（我前一次给批量任务调度器加的全局拉取），两个 query 并发：如果 runs 比 agents 先 ready，`fetchMyPipelineRuns` 一回来 cache 变化触发调度器 → 扫到 batch 主条全 done 后 backend 推 queued 的 post run → `runRun(postId)` 立刻开跑 → 此时 closure 里的 `agents = []`（还没回来）→ `agents.find(...)` 返回 undefined → 直接标 failed。Closure 一旦写错 db 就回不来了。**修法**：① `agentsRef = useRef(agents)` + `useEffect` 同步最新引用，所有读取走 `agentsRef.current`；② 新增 `resolveAgentWithRetry(agentId)`，第一次找不到时 `await 400ms × 3` 重试，仍找不到才算真删了。这样既防 race（agents 慢一两秒回来就能拿到）又不耽误真删除场景（最多多等 1.2s 才标 failed）。
++ [运维] 数据库手动救活 batch `batch-ec3411e9` 的 2 条 post run：从 `failed` 改回 `queued` + 清错误信息，batch.status 从 `partial` 改回 `running`，等新版后端 docker 镜像部署完 + 用户刷新 batch detail，调度器会重新拿起来跑。
+
 ## v0.0.27 - 2026-05-28
 
 + [调整] **「流水线模式」Tab 不再显示批量任务里的 runs**：之前 `PipelineMode` 直接渲染 `RUNS_QUERY_KEY` 列表所有 runs，把批量任务里的 main / post runs 也混着列出来，列表又长又乱、还容易被用户误删。现在 `PipelineMode` 加一道前端过滤 `runs.filter(r => !r.batchId)`，只显示独立 run；批量任务里的 runs 全部归集到「批量任务」Tab 和详情页里。RUNS_QUERY_KEY cache 内容本身不动（调度器仍需要看到所有 runs），只在 UI 层过滤展示。

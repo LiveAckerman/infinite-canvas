@@ -106,6 +106,27 @@ export function usePipelineRunManager({ agents }: Props) {
   const cancelledIdsRef = useRef<Set<string>>(new Set());
   // 用 ref 而不是 state 暴露 inflightIds 给外面看（用 subscriber 通知组件 rerender）
   const subscribersRef = useRef<Set<() => void>>(new Set());
+  // agents 用 ref 跟踪最新引用：runRun / runSingleStep 是异步函数，开始执行时
+  // closure 捕获的 agents 可能是 hook 早期 render 的旧引用（agents query 还没回来时 = []）。
+  // 在 await 期间 agents 加载完了，但 runRun 内部仍读旧的 agents → 报「角色不存在或已被删除」。
+  // 用 agentsRef 让所有读取永远拿到最新一帧的 agents。
+  const agentsRef = useRef<Agent[]>(agents);
+  useEffect(() => {
+    agentsRef.current = agents;
+  }, [agents]);
+
+  // resolveAgentWithRetry 找 agent；如果当前 agents 数组里没有，等 1.2s 再试一次（防 agents 刚 mount 的 race）。
+  // 仍找不到才算真删了 / 真不属于本用户。500ms × 3 留余量给慢网络。
+  const resolveAgentWithRetry = async (agentId: string): Promise<Agent | null> => {
+    const direct = agentsRef.current.find((item) => item.id === agentId);
+    if (direct) return direct;
+    for (let i = 0; i < 3; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const found = agentsRef.current.find((item) => item.id === agentId);
+      if (found) return found;
+    }
+    return null;
+  };
 
   const notifySubscribers = () => {
     subscribersRef.current.forEach((fn) => fn());
@@ -215,7 +236,8 @@ export function usePipelineRunManager({ agents }: Props) {
         }
         const step = current.steps[i];
         if (step.status === "success") continue; // 已成功的跳过（续跑场景）
-        const agent = agents.find((item) => item.id === step.agentId);
+        // 用 ref + retry 拿 agent，避免 agents query 还没回来时调度器误判「角色不存在」。
+        const agent = await resolveAgentWithRetry(step.agentId);
         if (!agent) {
           current = patchStep(current, i, {
             status: "failed",
@@ -397,7 +419,7 @@ export function usePipelineRunManager({ agents }: Props) {
     if (!run) return;
     const step = run.steps[stepIndex];
     if (!step) return;
-    const agent = agents.find((item) => item.id === step.agentId);
+    const agent = await resolveAgentWithRetry(step.agentId);
     if (!agent) {
       applyStepPatchOptimistically(runId, stepIndex, { status: "failed", errorMessage: "角色不存在或已被删除" });
       void persistRun(patchStep(run, stepIndex, { status: "failed", errorMessage: "角色不存在或已被删除" }));
