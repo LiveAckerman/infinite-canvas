@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.0.29 - 2026-05-28
+
++ [新增] **批量任务详情页 failed / paused 的后处理 run 加「重做」按钮**：之前 batch detail 页里 post run 卡用 `PipelineRunCard` 渲染但传 `eligible={false}`，导致所有按钮（执行 / 复制 / 删除）全 disable。用户碰上 post run failed 时**完全没办法在 UI 上重试**，只能去 db / 单 run detail 页里手动 reset。现在 batch detail 页里给 `status === "failed" || status === "paused"` 的 post run 卡下方加一个蓝色「重做后处理「{角色名}」」按钮（带 `RefreshCw` 图标），点击后 reset 这条 run 的 status + steps[0] 状态到 queued/idle，PUT 写库 + 乐观更新 detail/list 两份 cache，调度器立刻接管开跑。配 v0.0.28 的 agents 闭包 retry 兜底，post run 失败后用户能一键救活。
+
 ## v0.0.28 - 2026-05-28
 
 + [修复] **批量任务的后处理 run 偶发性「角色不存在或已被删除」误判失败**：`use-pipeline-run-manager.ts` 里 `runRun` / `runSingleStep` 都用 closure 里的 `agents` 数组找 agent，但 `agents` 来自 layout 的 `useQuery({ queryKey: ["my-agents"] })`。layout 还同时拉了 `["my-pipeline-runs"]`（我前一次给批量任务调度器加的全局拉取），两个 query 并发：如果 runs 比 agents 先 ready，`fetchMyPipelineRuns` 一回来 cache 变化触发调度器 → 扫到 batch 主条全 done 后 backend 推 queued 的 post run → `runRun(postId)` 立刻开跑 → 此时 closure 里的 `agents = []`（还没回来）→ `agents.find(...)` 返回 undefined → 直接标 failed。Closure 一旦写错 db 就回不来了。**修法**：① `agentsRef = useRef(agents)` + `useEffect` 同步最新引用，所有读取走 `agentsRef.current`；② 新增 `resolveAgentWithRetry(agentId)`，第一次找不到时 `await 400ms × 3` 重试，仍找不到才算真删了。这样既防 race（agents 慢一两秒回来就能拿到）又不耽误真删除场景（最多多等 1.2s 才标 failed）。

@@ -47,6 +47,8 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
   // 「我先去补救」=> 用户暂时把决策卡隐藏；只能等用户主动点旁边的「重新检查 sources」再次显示
   const [decisionCardHidden, setDecisionCardHidden] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  // 后处理 run 重做时锁定 button，避免重复点击触发多次 PUT
+  const [retryingPostId, setRetryingPostId] = useState<string>("");
 
   const batchQuery = useQuery({
     queryKey: [...BATCHES_QUERY_KEY, batchId],
@@ -157,6 +159,43 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
       message.error(error instanceof Error ? error.message : "启动失败");
     },
   });
+
+  // 重做单条 failed / paused 的 post run：把 run + step 全部 reset 到 queued/idle 写库；
+  // 调度器订阅 cache 变化会自动捡起来跑（v0.0.28 起 agents 闭包 race 有 ref + retry 兜底）。
+  const handleRetryPostRun = async (run: PipelineRun) => {
+    setRetryingPostId(run.id);
+    try {
+      const next: PipelineRun = {
+        ...run,
+        status: "queued",
+        steps: run.steps.map((step) => ({
+          ...step,
+          status: "idle",
+          outputKey: undefined,
+          errorMessage: undefined,
+          durationMs: undefined,
+          lastRunSnapshot: undefined,
+        })),
+      };
+      const saved = await saveMyPipelineRun(token, next);
+      // detail / list 两份 cache 都乐观写一份，让调度器立刻能看到
+      queryClient.setQueryData<PipelineBatchDetail>([...BATCHES_QUERY_KEY, batchId], (old) => {
+        if (!old) return old;
+        return { ...old, postRuns: old.postRuns.map((item) => (item.id === saved.id ? saved : item)) };
+      });
+      queryClient.setQueryData<PipelineRunListResponse>(RUNS_QUERY_KEY, (old) => {
+        if (!old) return { items: [saved], total: 1 };
+        const exists = old.items.some((item) => item.id === saved.id);
+        if (exists) return { ...old, items: old.items.map((item) => (item.id === saved.id ? saved : item)) };
+        return { ...old, items: [...old.items, saved], total: old.total + 1 };
+      });
+      message.success("已重新排队，稍等就会自动开跑");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "重做失败");
+    } finally {
+      setRetryingPostId("");
+    }
+  };
 
   const deleteMutation = useMutation({
     mutationFn: () => deleteMyPipelineBatch(token, batchId),
@@ -531,22 +570,38 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
               title={!isMainAllDone ? "等待主条阶段完成" : undefined}
             >
               {detail.postRuns.map((run) => (
-                <PipelineRunCard
-                  key={run.id}
-                  run={run}
-                  onOpen={() => openRun(run.id)}
-                  onDownload={() => {
-                    message.info("请到该后处理 run 详情页内下载单条 zip，或在批次终态时使用上方「下载所有产物」打包下载");
-                  }}
-                  onDelete={() => message.info("批量任务的 post run 不可单独删除，请删除整个批次")}
-                  onDuplicate={() => message.info("批量任务的 post run 不支持复制")}
-                  onSeedUploaded={() => {/* post run 的输入由 sources 决定，不允许替换 seed */}}
-                  onStart={() => {/* post run 单条启动入口走详情页 */}}
-                  selected={false}
-                  onSelectedChange={() => {/* batch 详情下不提供单条勾选 */}}
-                  eligible={false}
-                  downloading={false}
-                />
+                <div key={run.id} className="flex flex-col gap-2">
+                  <PipelineRunCard
+                    run={run}
+                    onOpen={() => openRun(run.id)}
+                    onDownload={() => {
+                      message.info("请到该后处理 run 详情页内下载单条 zip，或在批次终态时使用上方「下载所有产物」打包下载");
+                    }}
+                    onDelete={() => message.info("批量任务的 post run 不可单独删除，请删除整个批次")}
+                    onDuplicate={() => message.info("批量任务的 post run 不支持复制")}
+                    onSeedUploaded={() => {/* post run 的输入由 sources 决定，不允许替换 seed */}}
+                    onStart={() => {/* post run 单条启动入口走详情页 */}}
+                    selected={false}
+                    onSelectedChange={() => {/* batch 详情下不提供单条勾选 */}}
+                    eligible={false}
+                    downloading={false}
+                  />
+                  {/* failed / paused 状态的 post run 给个「重做」按钮：把这条 run + 它的 step 全部 reset 到 queued，
+                      调度器会自动捡起来跑（resolveAgentWithRetry 兜底 agents race）。
+                      idle / running / queued / success 不显示，避免误触。 */}
+                  {run.status === "failed" || run.status === "paused" ? (
+                    <Button
+                      size="small"
+                      type="primary"
+                      icon={<RefreshCw className="size-3.5" />}
+                      loading={retryingPostId === run.id}
+                      onClick={() => void handleRetryPostRun(run)}
+                      block
+                    >
+                      重做后处理「{run.steps[0]?.agentName || "未命名"}」
+                    </Button>
+                  ) : null}
+                </div>
               ))}
             </div>
           )}
