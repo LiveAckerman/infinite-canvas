@@ -171,7 +171,12 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
   const logs = logsQuery.data?.items || [];
 
   // 直接访问 /image/{id} 或在记录列表里点击某条记录后，自动把对应记录展开到右侧。
+  // ⚠️ 正在生成（isGeneratingRef）时不能跑这条 effect：generate() 自己会改 URL / logs cache / autoPreviewedIdRef，
+  // 三个状态不是同一次 render 提交的；中间会出现一个 race window —— logs.length 已经 +1、initialLogId
+  // 还是上一条记录的 id，effect 误以为"用户点击了旧记录"，调 previewGenerationLog 把 refs / prompt 全部
+  // 回填成旧记录的内容，刚改完的参考图就被覆盖回去了。生成全过程都受 isGeneratingRef 保护。
   useEffect(() => {
+    if (isGeneratingRef.current) return;
     if (!initialLogId) return;
     if (autoPreviewedIdRef.current === initialLogId) return;
     if (!logs.length) return;
@@ -287,8 +292,14 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
     setElapsedMs(0);
     setRunning(true);
     isGeneratingRef.current = true;
-    setPreviewLog(null);
-    setResults(Array.from({ length: generationCount }, () => ({ id: createId(), status: "pending" })));
+    // 追加而不是替换：用户连续点「开始生成」时新一批 slot 接到现有 results 末尾，
+    // 旧产物保留可视。想清空回到「干净的工作台」走左侧「新建」按钮（createSession 里 setResults([])）。
+    // 切到左侧别的记录看历史时，previewGenerationLog 仍是替换语义（用那条记录的图替换 results）。
+    const slotOffset = results.length;
+    setResults((prev) => [
+      ...prev,
+      ...Array.from({ length: generationCount }, (): GenerationResult => ({ id: createId(), status: "pending" })),
+    ]);
     const batchStartedAt = performance.now();
     setStartedAt(batchStartedAt);
 
@@ -303,84 +314,141 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
       quality: qualityValue,
       referenceCount: snapshot.references.length,
     };
-    // 抓取并立刻清空"微调来源"标记：本次 generate 用完之后不再续。
-    // 如果用户点了某张图的微调按钮，pendingParentIdRef 会指向那条 record id。
+    // 抓取并立刻清空"微调来源"标记。
+    // 如果用户点了某张图的微调按钮，pendingParentIdRef 指向那条 record id —— 这种情况要 spawn 新记录。
     const parentId = pendingParentIdRef.current || undefined;
     pendingParentIdRef.current = null;
 
-    // 第一阶段：点击「开始生成」就立刻入库一条 status=running 占位记录。
-    // 这样即使浏览器关掉、网络抖动、所有 task 失败，用户也能在历史里看到这次调用，
-    // URL 也立刻切到 /image/{id}，刷新可恢复。
-    let placeholder: GenerationRecord;
-    try {
-      placeholder = await saveLogMutation.mutateAsync({
-        prompt: text,
-        mode,
-        model: "",
-        size: sizeValue,
-        quality: qualityValue,
-        count: generationCount,
-        successCount: 0,
-        failCount: 0,
-        durationMs: 0,
-        status: "running",
-        thumbnails: [],
-        references: referenceKeys,
-        errors: [],
-        requestParams,
-        upstreamMeta: "",
-        parentId,
-      });
-    } catch {
-      // mutation onError 已弹 message；首阶段都没入库，干脆中止避免空转。
-      setRunning(false);
-      isGeneratingRef.current = false;
-      return;
-    }
-    setPreviewLog(placeholder);
-    autoPreviewedIdRef.current = placeholder.id;
-    activeGenerationIdRef.current = placeholder.id;
-    router.replace(`/image/${placeholder.id}`);
+    // 路径判定：
+    //   - 微调（有 parentId）→ 创建新记录，parent 指向源记录
+    //   - 当前已有 previewLog（同记录内迭代）→ 编辑现有记录（count / thumbnails / errors / durationMs 都累加）
+    //   - 没有 previewLog（点过「新建」或首次进 /image）→ 创建新记录
+    // 想强制开新记录走左侧「新建」按钮（清掉 previewLog）。
+    const editingLog: GenerationRecord | null = !parentId && previewLog ? previewLog : null;
 
-    // 第二阶段：跑全部 task，结束后用 placeholder.id upsert 最终状态。
-    const tasks = Array.from({ length: generationCount }, (_, index) => runGenerationSlot(index, snapshot));
+    // 第一阶段：把记录标 running。
+    //   - 编辑模式：PUT 把现有记录 count += generationCount + status="running"，thumbnails / successCount / failCount 保持。
+    //   - 新建模式：POST 一条新 placeholder（count = generationCount, status="running"），切 URL。
+    let recordId: string;
+    if (editingLog) {
+      try {
+        const running = await saveLogMutation.mutateAsync({
+          id: editingLog.id,
+          prompt: text,
+          mode,
+          model: editingLog.model,
+          size: sizeValue,
+          quality: qualityValue,
+          count: editingLog.count + generationCount,
+          successCount: editingLog.successCount,
+          failCount: editingLog.failCount,
+          durationMs: editingLog.durationMs,
+          status: "running",
+          thumbnails: editingLog.thumbnails,
+          references: referenceKeys,
+          errors: editingLog.errors,
+          requestParams,
+          upstreamMeta: editingLog.upstreamMeta,
+          parentId: editingLog.parentId || undefined,
+        });
+        setPreviewLog(running);
+        recordId = editingLog.id;
+        activeGenerationIdRef.current = editingLog.id;
+        // URL 不变：用户已经在 /image/{editingLog.id}
+      } catch {
+        // mutation onError 已弹 message；首阶段都没入库，中止避免空转。
+        setRunning(false);
+        isGeneratingRef.current = false;
+        return;
+      }
+    } else {
+      let placeholder: GenerationRecord;
+      try {
+        placeholder = await saveLogMutation.mutateAsync({
+          prompt: text,
+          mode,
+          model: "",
+          size: sizeValue,
+          quality: qualityValue,
+          count: generationCount,
+          successCount: 0,
+          failCount: 0,
+          durationMs: 0,
+          status: "running",
+          thumbnails: [],
+          references: referenceKeys,
+          errors: [],
+          requestParams,
+          upstreamMeta: "",
+          parentId,
+        });
+      } catch {
+        setRunning(false);
+        isGeneratingRef.current = false;
+        return;
+      }
+      setPreviewLog(placeholder);
+      autoPreviewedIdRef.current = placeholder.id;
+      activeGenerationIdRef.current = placeholder.id;
+      router.replace(`/image/${placeholder.id}`);
+      recordId = placeholder.id;
+    }
+
+    // 第二阶段：跑全部 task。
+    // slotOffset 是这批 pending slot 在追加后的 results 数组里的起始下标，
+    // runGenerationSlot 拿到的 index 是绝对位置，updateResultAt 才能定位到正确的卡片。
+    const tasks = Array.from({ length: generationCount }, (_, index) => runGenerationSlot(slotOffset + index, snapshot));
     const result = await Promise.allSettled(tasks);
     const successItems = result
       .filter((item): item is PromiseFulfilledResult<SlotOutcome> => item.status === "fulfilled")
       .map((item) => item.value);
-    const successImages = successItems.map((item) => item.image);
-    const successCount = successImages.length;
-    const failCount = generationCount - successCount;
-    const failed = result.find((item): item is PromiseRejectedResult => item.status === "rejected");
-    const status = successCount === generationCount ? "success" : successCount ? "partial" : "failed";
-    const durationMs = performance.now() - batchStartedAt;
-    const errors = result
+    const batchSuccessImages = successItems.map((item) => item.image);
+    const batchSuccessCount = batchSuccessImages.length;
+    const batchFailCount = generationCount - batchSuccessCount;
+    const batchFailed = result.find((item): item is PromiseRejectedResult => item.status === "rejected");
+    const batchDurationMs = performance.now() - batchStartedAt;
+    const batchErrors = result
       .filter((item): item is PromiseRejectedResult => item.status === "rejected")
       .map((item) => (item.reason instanceof Error ? item.reason.message : String(item.reason)));
-    const upstreamMeta = successItems[successItems.length - 1]?.upstreamMeta || "";
+    const batchUpstreamMeta = successItems[successItems.length - 1]?.upstreamMeta || "";
+
+    // 累加（编辑模式）或单批（新建模式）
+    const totalCount = editingLog ? editingLog.count + generationCount : generationCount;
+    const totalSuccessCount = (editingLog?.successCount || 0) + batchSuccessCount;
+    const totalFailCount = (editingLog?.failCount || 0) + batchFailCount;
+    const totalDurationMs = (editingLog?.durationMs || 0) + batchDurationMs;
+    const accumulatedThumbnails = [
+      ...(editingLog?.thumbnails || []),
+      ...batchSuccessImages.map((image) => image.storageKey || "").filter(Boolean),
+    ];
+    const accumulatedErrors = [...(editingLog?.errors || []), ...batchErrors];
+    const finalStatus = totalSuccessCount === totalCount ? "success" : totalSuccessCount ? "partial" : "failed";
 
     try {
       const saved = await saveLogMutation.mutateAsync({
-        id: placeholder.id,
+        id: recordId,
         prompt: text,
         mode,
-        model: "",
+        model: editingLog?.model || "",
         size: sizeValue,
         quality: qualityValue,
-        count: generationCount,
-        successCount,
-        failCount,
-        durationMs,
-        status,
-        thumbnails: successImages.map((image) => image.storageKey || "").filter(Boolean),
+        count: totalCount,
+        successCount: totalSuccessCount,
+        failCount: totalFailCount,
+        durationMs: totalDurationMs,
+        status: finalStatus,
+        thumbnails: accumulatedThumbnails,
         references: referenceKeys,
-        errors,
+        errors: accumulatedErrors,
         requestParams,
-        upstreamMeta,
-        parentId,
+        upstreamMeta: batchUpstreamMeta || editingLog?.upstreamMeta || "",
+        parentId: editingLog?.parentId || parentId,
       });
       setPreviewLog(saved);
-      successCount ? message.success("图片已生成") : message.error(failed?.reason instanceof Error ? failed.reason.message : "生成失败");
+      // toast 以「本次新批次」为准，跟旧累计无关：用户关心的是这次点击有没有成功
+      batchSuccessCount
+        ? message.success(editingLog ? "图片已追加" : "图片已生成")
+        : message.error(batchFailed?.reason instanceof Error ? batchFailed.reason.message : "生成失败");
     } finally {
       setRunning(false);
       isGeneratingRef.current = false;

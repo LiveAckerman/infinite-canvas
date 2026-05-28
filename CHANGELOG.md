@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## v0.0.22 - 2026-05-22
+
++ [调整] **`/image` 二次生成改成编辑现有 record，不再新建**：上一版「二次生成产物追加」改的只是 UI 累加（每点一次仍新建一条 generation record，左侧列表越点越多）。这次进一步把数据模型也改了：当 `previewLog` 存在且不是从「微调」按钮触发时，generate() **直接 PUT 编辑现有 record**，不创建新 placeholder：count / thumbnails / errors / durationMs 全部累加；prompt / refs / size / quality / requestParams 取本次最新；URL 不变。三种触发的语义：
+  - **没有 previewLog**（点过「新建」或首次进 /image）→ 创建新 record（保留原行为）
+  - **有 previewLog 且非微调**（同记录内迭代）→ 编辑现有 record，累加这次的 batch
+  - **微调按钮触发**（有 `pendingParentIdRef`）→ 仍创建新 record + `parentId` 串到源记录（保留派生子记录的语义）
+  - 想强制开新一条 → 走左侧「新建」清掉 previewLog
+  - 中途刷新页面：第一阶段 PUT 已把 count 升到累加值、thumbnails 仍是旧的，刷新瞬间 `previewGenerationLog` 看到 `status=running` 且不是「自己的 placeholder」（isGeneratingRef=false），剩余 slot 渲染成「被中断」红卡片可重试，符合既有两阶段入库语义。
+  - toast 文案区分：编辑模式跑成功 → 「图片已追加」；新建模式 → 「图片已生成」。
+  - 左侧记录列表：连续多次迭代后只看到 **1 条记录**（不再每点 +1），thumbnails 计数累加。
+
++ [修复] **`/image` 生图工作台两个相关的「二次生成」bug**：
+  - **改参考图后再点开始生成，生成完成瞬间参考图被回退到上次的旧值**。根因是 auto-preview useEffect 跟 `generate()` 之间的 race window —— generate() 同步执行链里依次：① saveLogMutation.onSuccess 把新 placeholder 推进 logs cache（`logs.length` +1）、② `autoPreviewedIdRef.current = placeholder.id`、③ `router.replace('/image/{placeholder.id}')`。但第 ③ 步 router.replace 不会同步更新 `initialLogId` prop，要等下一次 render。中间会出现一个 render 状态：`logs.length` 已变 / `initialLogId` 还是上一条记录 id / `autoPreviewedIdRef` 已经是新 placeholder。这时 useEffect 触发（dep `logs.length` 变了），条件 `autoPreviewedIdRef === initialLogId` 不成立，进入正常分支拿**旧的** initialLogId 找 target log，调 `previewGenerationLog(旧 log)` → 把 refs / prompt / count / size / quality 全部回填成旧记录的内容 → 用户刚改的参考图被覆盖。修复：useEffect 顶部加 `if (isGeneratingRef.current) return;`，整个 generate 期间不允许 auto-preview 反向覆盖 workspace state。
+  - **二次生成的产物把第一次的结果替换掉**。`generate()` 第一行 `setResults(Array.from(...))` 整段重置 results，所以连续点几次「开始生成」只能看到最后一次的结果。改成**追加**：`const slotOffset = results.length; setResults((prev) => [...prev, ...newSlots])`，并把 `slotOffset + index` 作为绝对位置传给 `runGenerationSlot`，updateResultAt 落点不会冲突。想清空回到「干净的工作台」走左侧「新建」按钮（沿用 `createSession` 的 `setResults([])`）。切到左侧别的历史记录看时 `previewGenerationLog` 仍是替换语义（用那条记录的图替换 results，避免历史视图和当前会话混淆）。每条 generation 记录在 DB 里**仍只代表自己这次的 batch**，刷新页面会回归 canonical 视图。
+
 ## v0.0.21 - 2026-05-22
 
 + [新增] **`/image` 工作台参考图支持点击放大预览**：参考图横向列表里每张缩略图的 `<img>` 换成 antd `<Image>`，所有缩略图共享一个 `<Image.PreviewGroup>` —— 点击任意一张打开全屏预览，浮层里能左右切换浏览全部参考图、缩放、旋转、键盘 ←→。和 `frontend-design` skill 强调的「画布图片节点可点击放大」是同一套预览体验。拖动重排不受影响（PointerSensor 6px 距离阈值 + 整张缩略图仍是 drag handle）；X 删除按钮的 `pointerdown` 和 `click` 都 stopPropagation，所以点 × 不会被误识别成「点开预览」或「开始拖动」。
