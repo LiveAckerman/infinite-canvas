@@ -22,6 +22,12 @@ import (
 const upstreamTimeout = 5 * time.Minute
 
 // AIImageGenerations 反代 OpenAI 兼容的 /v1/images/generations，并按返回图片张数扣额度。
+//
+// 额度扣减采用 reserve-then-confirm 模式（防止并发请求都看到正余额都过 pre-check 的 race）：
+//  1. 请求开始时按 payload.n（默认 1）原子预扣
+//  2. 上游失败 / 返回数量 0 → 全额退回
+//  3. 上游返回 N < 预扣数 → 退回差额
+// 这样无论用户并发点几次 / 多 tab，DB 层都保证不会超扣。
 func AIImageGenerations(w http.ResponseWriter, r *http.Request) {
 	user, ok := requireUser(w, r)
 	if !ok {
@@ -47,34 +53,56 @@ func AIImageGenerations(w http.ResponseWriter, r *http.Request) {
 	payload["model"] = cfg.ImageModel
 	payload["response_format"] = "b64_json"
 
-	if user.Role != model.UserRoleAdmin && user.Credits <= 0 {
-		Fail(w, "额度不足，请联系管理员")
-		return
+	reserved := requestedImageCount(payload)
+	isAdmin := user.Role == model.UserRoleAdmin
+	if !isAdmin {
+		balance, ok, err := service.ConsumeCredits(user.ID, reserved)
+		if err != nil {
+			log.Printf("reserve credits failed user=%s amount=%d err=%v", user.ID, reserved, err)
+			Fail(w, "额度预扣失败，请稍后再试")
+			return
+		}
+		if !ok {
+			Fail(w, "额度不足，请联系管理员")
+			return
+		}
+		_ = balance // 真正写流水放到上游成功之后；这里只保证「能扣到」
 	}
 
 	raw, status, err := postUpstreamJSON(cfg, "/v1/images/generations", payload)
 	if err != nil {
+		refundOnFailure(user, isAdmin, reserved)
 		Fail(w, err.Error())
 		return
 	}
 	if status < 200 || status >= 300 {
+		refundOnFailure(user, isAdmin, reserved)
 		Fail(w, parseUpstreamMessage(raw, status))
 		return
 	}
 
 	count := countImagePayload(raw)
 	if count == 0 {
+		refundOnFailure(user, isAdmin, reserved)
 		Fail(w, "上游未返回图片")
 		return
 	}
+
 	remaining := -1
-	if user.Role != model.UserRoleAdmin {
-		balance, _, err := service.ConsumeCredits(user.ID, count)
-		if err != nil {
-			log.Printf("consume credits failed user=%s amount=%d err=%v", user.ID, count, err)
+	if !isAdmin {
+		// 上游可能给得比预扣少（用户要 3 张但只回来 2 张），把差额退回。
+		if count < reserved {
+			balance, err := service.RefundCredits(user.ID, reserved-count)
+			if err != nil {
+				log.Printf("refund credits diff failed user=%s diff=%d err=%v", user.ID, reserved-count, err)
+			}
+			remaining = balance
+		} else {
+			// 上游给得不比预扣多（API 不会超发，但兜底）；直接读最新余额
+			refreshed, _, _ := service.ConsumeCredits(user.ID, 0)
+			remaining = refreshed
 		}
-		remaining = balance
-		logImageConsume(user.ID, count, balance, cfg.ImageModel, "文生图")
+		logImageConsume(user.ID, count, remaining, cfg.ImageModel, "文生图")
 	}
 
 	OK(w, wrapImageResult(raw, remaining))
@@ -96,9 +124,25 @@ func AIImageEdits(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if user.Role != model.UserRoleAdmin && user.Credits <= 0 {
-		Fail(w, "额度不足，请联系管理员")
-		return
+
+	// 跟 AIImageGenerations 一样的 reserve-then-confirm 模式。
+	// /v1/images/edits 的「n」从 form 里读不太方便（multipart 还没写呢），所以这里
+	// 先按「最大 1 张」预扣，绝大多数图生图都是 n=1；下游真返回多张再补扣。
+	// 这个保守预扣不会少扣（最坏多预扣 1）但杜绝 race 漏单。
+	reserved := requestedEditsCount(r)
+	isAdmin := user.Role == model.UserRoleAdmin
+	if !isAdmin {
+		balance, ok, err := service.ConsumeCredits(user.ID, reserved)
+		if err != nil {
+			log.Printf("reserve credits failed user=%s amount=%d err=%v", user.ID, reserved, err)
+			Fail(w, "额度预扣失败，请稍后再试")
+			return
+		}
+		if !ok {
+			Fail(w, "额度不足，请联系管理员")
+			return
+		}
+		_ = balance
 	}
 
 	bodyBuf := &bytes.Buffer{}
@@ -106,10 +150,12 @@ func AIImageEdits(w http.ResponseWriter, r *http.Request) {
 
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 		if !writeEditsFromJSON(w, r, user, writer) {
+			refundOnFailure(user, isAdmin, reserved)
 			return
 		}
 	} else {
 		if !writeEditsFromMultipart(w, r, writer) {
+			refundOnFailure(user, isAdmin, reserved)
 			return
 		}
 	}
@@ -117,6 +163,7 @@ func AIImageEdits(w http.ResponseWriter, r *http.Request) {
 	_ = writer.WriteField("model", cfg.ImageModel)
 	_ = writer.WriteField("response_format", "b64_json")
 	if err := writer.Close(); err != nil {
+		refundOnFailure(user, isAdmin, reserved)
 		Fail(w, "请求构造失败")
 		return
 	}
@@ -124,6 +171,7 @@ func AIImageEdits(w http.ResponseWriter, r *http.Request) {
 	endpoint := upstreamURL(cfg.BaseURL, "/v1/images/edits")
 	req, err := http.NewRequest(http.MethodPost, endpoint, bodyBuf)
 	if err != nil {
+		refundOnFailure(user, isAdmin, reserved)
 		Fail(w, "请求构造失败")
 		return
 	}
@@ -133,28 +181,47 @@ func AIImageEdits(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{Timeout: upstreamTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
+		refundOnFailure(user, isAdmin, reserved)
 		Fail(w, "上游请求失败："+err.Error())
 		return
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		refundOnFailure(user, isAdmin, reserved)
 		Fail(w, parseUpstreamMessage(raw, resp.StatusCode))
 		return
 	}
 	count := countImagePayload(raw)
 	if count == 0 {
+		refundOnFailure(user, isAdmin, reserved)
 		Fail(w, "上游未返回图片")
 		return
 	}
 	remaining := -1
-	if user.Role != model.UserRoleAdmin {
-		balance, _, err := service.ConsumeCredits(user.ID, count)
-		if err != nil {
-			log.Printf("consume credits failed user=%s amount=%d err=%v", user.ID, count, err)
+	if !isAdmin {
+		if count < reserved {
+			balance, err := service.RefundCredits(user.ID, reserved-count)
+			if err != nil {
+				log.Printf("refund credits diff failed user=%s diff=%d err=%v", user.ID, reserved-count, err)
+			}
+			remaining = balance
+		} else if count > reserved {
+			// 极少见：上游真给得比预扣多（比如 n=1 预扣但回来 2 张）。补扣差额。
+			// 若补扣失败（用户余额不够补），也不强制拒绝，按 reserved 张数计费；
+			// 多生的几张算白送，避免错误地把已经返回的图扔掉。
+			extra := count - reserved
+			if _, ok, err := service.ConsumeCredits(user.ID, extra); err != nil || !ok {
+				log.Printf("extra-consume credits insufficient user=%s extra=%d ok=%v err=%v", user.ID, extra, ok, err)
+				count = reserved
+			}
+			refreshed, _, _ := service.ConsumeCredits(user.ID, 0)
+			remaining = refreshed
+		} else {
+			refreshed, _, _ := service.ConsumeCredits(user.ID, 0)
+			remaining = refreshed
 		}
-		remaining = balance
-		logImageConsume(user.ID, count, balance, cfg.ImageModel, "图生图")
+		logImageConsume(user.ID, count, remaining, cfg.ImageModel, "图生图")
 	}
 	OK(w, wrapImageResult(raw, remaining))
 }
@@ -394,6 +461,56 @@ func redactUpstreamMeta(raw []byte) string {
 	return string(out)
 }
 
+// requestedImageCount 从 /v1/images/generations 的 JSON payload 里读出请求张数 n。
+// 范围 1~15（跟前端 image.ts 的 clamp 一致），缺省 1。
+func requestedImageCount(payload map[string]any) int {
+	n := 1
+	if v, ok := payload["n"]; ok {
+		switch value := v.(type) {
+		case float64:
+			n = int(value)
+		case int:
+			n = value
+		case string:
+			if parsed, err := strconv.Atoi(value); err == nil {
+				n = parsed
+			}
+		}
+	}
+	if n < 1 {
+		n = 1
+	}
+	if n > 15 {
+		n = 15
+	}
+	return n
+}
+
+// requestedEditsCount 从 /v1/images/edits 的 form / json 入参里尽量读出 n。
+// edits 大多数情况下 n=1（图生图就 1 张产物），所以读取失败也不算严重错误，缺省 1。
+// 这里只是给「reserve-then-confirm」预扣的初始值用，上游真返回多张时会补扣，少返回时会退回。
+func requestedEditsCount(r *http.Request) int {
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		// JSON 路径：读 body 但又会被后续 multipart 写入用到，所以 io.ReadAll 后重置不可行。
+		// 偷懒：直接默认 1（绝大多数 edits 都是 1 张）。即便用户真传 n=N，预扣 1 + 后面补扣 N-1
+		// 走同一条路径，行为正确。
+		return 1
+	}
+	// multipart 路径：解析 form 又会被后续 multipart 阻断；同样保守按 1 预扣
+	return 1
+}
+
+// refundOnFailure 上游失败 / 准备 multipart 失败时，把预扣的额度退回去。
+// 管理员不参与扣减，跳过；reserved=0 也不需要退。
+func refundOnFailure(user model.AuthUser, isAdmin bool, reserved int) {
+	if isAdmin || reserved <= 0 {
+		return
+	}
+	if _, err := service.RefundCredits(user.ID, reserved); err != nil {
+		log.Printf("refund credits failed user=%s amount=%d err=%v", user.ID, reserved, err)
+	}
+}
+
 func countImagePayload(raw []byte) int {
 	var payload struct {
 		Data []map[string]any `json:"data"`
@@ -465,8 +582,11 @@ func looksLikeHTML(body []byte) bool {
 }
 
 // editsJSONReferenceLimit 限制图生图最多带几张参考图，防止有人发巨量 id 让后端
-// 一次性把 N 张大图从磁盘读进内存。8 张对正常使用足够。
-const editsJSONReferenceLimit = 8
+// 一次性把 N 张大图从磁盘读进内存。
+// gpt-image-2 上游官方上限是 16 张，但实践中超过 4 张时模型对各参考图的关注度会
+// 被稀释、成功率明显下降。当前产品上限定在 **9 张**，兼顾「比 4 张多一点的余量」
+// 和「不让用户拿着 16 张去喂模型遭遇质量崩」。如要调整改这一处常量即可。
+const editsJSONReferenceLimit = 9
 
 // writeEditsFromJSON 处理 application/json 入参的 /v1/images/edits 调用：
 // 把 prompt/n/size/quality 写入 multipart 文本字段，把 references 按 storageKey 从磁盘

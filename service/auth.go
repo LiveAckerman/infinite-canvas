@@ -241,6 +241,19 @@ func ConsumeCredits(userID string, amount int) (int, bool, error) {
 	return repository.ConsumeUserCredits(userID, amount)
 }
 
+// RefundCredits 退回额度（reserve-then-confirm 模式里用，上游失败或返回数量不符时调）。
+// 不会失败也不需要检查余额（退回总是合法的）。
+func RefundCredits(userID string, amount int) (int, error) {
+	if amount <= 0 {
+		user, ok, err := repository.GetUserByID(userID)
+		if err != nil || !ok {
+			return 0, err
+		}
+		return user.Credits, nil
+	}
+	return repository.RefundUserCredits(userID, amount)
+}
+
 func GuestUser() model.AuthUser {
 	return model.AuthUser{ID: "", Username: "guest", Role: model.UserRoleGuest}
 }

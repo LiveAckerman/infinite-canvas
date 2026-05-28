@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.0.24 - 2026-05-28
+
++ [修复] **生图额度并发扣减 race，余额为 0 仍能继续扣**：用户多 tab / 多次连点「开始生成」时，会观察到 `/admin/credit-logs` 出现「-1 → 余额 0」的多条连续记录 —— 看起来扣到 0 还能继续扣。**真正根因**：① `handler/ai_proxy.go` 调 `service.ConsumeCredits` 时把第二个返回值（`ok bool`）用 `_` 丢了，余额不足时 `RowsAffected=0` 返回 `(0, false, nil)`，handler 仍把这个失败当成功走了 `logImageConsume` 写流水 + 把图返给用户；② pre-check `user.Credits <= 0` 用的是请求开始时从 DB 读的快照，多个并发请求同时进来都看到正余额都过 pre-check，下游也都成功生图返回，只有第一个 `ConsumeCredits` 能扣到，其余扣减失败但流水照样记录 —— 形成「1 块钱白嫖 N 次」漏洞。**修法**：handler 改成「reserve-then-confirm」模式 —— 请求开始时按 payload.n（edits 兜底按 1）原子预扣，上游失败 / 数量为 0 全额 `service.RefundCredits` 退回；上游返回 N 小于预扣数退回差额，N 大于预扣数（极少见）补扣；补扣失败时只按 reserved 张数计费、多生的几张算白送不强制扔图。新增 `service.RefundCredits` + `repository.RefundUserCredits`（原子 `credits + ?`）。从根本上让 DB 层的 `WHERE credits >= ?` 原子条件成为唯一防线，pre-check 不再被并发绕过。
+
++ [修复] **后端业务错误（如「额度不足，请联系管理员」）在前端被降级显示成「请求失败」**：根因是 `services/api/image.ts` 的 `requestGeneration` / `requestEdit` 包了一层「外层 try 抓所有 error → 再 throw new Error(readAxiosError(error, "请求失败"))」的兜底逻辑——本意是处理网络层错误，结果把内层 envelope 解析后已经正确提取的 `error.message`（中文业务错误）又走了一遍 readAxiosError 流程；这条流程在某些边缘情况（envelope.msg 短暂被覆盖、Error 对象被特殊属性误判成 AxiosError 等）下会把消息降级到 fallback "请求失败"。修复方式：拆成两段，先做 axios 请求只 catch **「网络层失败」**，然后**直接**读 envelope.code / msg，envelope.msg（如「额度不足，请联系管理员」）现在能 100% 透传到 UI 的 FailedImageCard / 角色卡的错误条 / 顶部 toast。同时给 `readEnvelopeError` / `readAxiosError` 加了 `msg.trim() && msg !== "ok"` 防御性判断，避免空 msg / 兜底 "ok" 串进错误链；envelope 非空但格式异常时也会走 `describeStatus` 兜底。失败时 console.error 落一行原始 envelope 内容，DevTools 能直接复盘。
+
++ [调整] **`/v1/images/edits` 参考图上限定为 9 张**：之前 8 张太死板（用户传 9 张就被拒），上次改到 16 又怕用户拿着 16 张去喂模型遭遇质量崩。最终落到 **9 张** —— gpt-image-2 实践中超过 4 张关注度就会被稀释，9 张是「比 4 张多一点的余量 + 仍在可用范围内」的折中。`handler/ai_proxy.go:editsJSONReferenceLimit = 9`，超过返回「参考图数量超过上限（最多 9 张）」。multipart 路径（画布瞬时图）本来就没设硬上限，由前端 50MB 体积阈值兜底。
+
 ## v0.0.23 - 2026-05-22
 
 + [新增] **角色工作台两处提示词输入框接入「提示词优化」**：跟 `/image` 工作台 / 画布节点 prompt 面板 / 画布助手输入框一样，复用 `<PromptImproveBar>` 组件——

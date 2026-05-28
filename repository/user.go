@@ -83,6 +83,32 @@ func DeleteUser(id string) error {
 	return db.Delete(&model.User{}, "id = ?", id).Error
 }
 
+// RefundUserCredits 原子退回额度（不检查上限）。reserve-then-confirm 模式里
+// 上游失败 / 返回数量不符时调，把先前扣过的额度补回来。
+func RefundUserCredits(id string, amount int) (int, error) {
+	db, err := DB()
+	if err != nil {
+		return 0, err
+	}
+	if amount <= 0 {
+		user, ok, err := GetUserByID(id)
+		if err != nil || !ok {
+			return 0, err
+		}
+		return user.Credits, nil
+	}
+	if err := db.Model(&model.User{}).
+		Where("id = ?", id).
+		UpdateColumn("credits", gorm.Expr("credits + ?", amount)).Error; err != nil {
+		return 0, err
+	}
+	user, ok, err := GetUserByID(id)
+	if err != nil || !ok {
+		return 0, err
+	}
+	return user.Credits, nil
+}
+
 // ConsumeUserCredits 原子扣减指定用户的额度，返回扣减后的余额；
 // 当余额不足时不扣减并返回 false。
 func ConsumeUserCredits(id string, amount int) (int, bool, error) {

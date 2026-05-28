@@ -78,20 +78,33 @@ function describeStatus(status?: number, fallback = "请求失败") {
   return status ? `${fallback}：${status}` : fallback;
 }
 
+// 从 envelope 里挖错误文案。envelope.msg 是后端 Fail() 写的中文错误（用户最关心的内容），
+// 优先级永远高于 fallback。code === 0 但 msg 非空时也照样返回 msg（极少见，做防御处理）。
 function readEnvelopeError<T>(envelope: ApiEnvelope<T> | undefined, fallback: string, status?: number) {
-  if (envelope && envelope.code !== 0 && envelope.msg) return envelope.msg;
+  if (envelope && typeof envelope === "object") {
+    const msg = typeof envelope.msg === "string" ? envelope.msg.trim() : "";
+    if (msg && msg !== "ok") return msg;
+  }
   return describeStatus(status, fallback);
 }
 
+// 只在「axios 自己抛错（网络层 / 取消 / DNS 等）」时才会调到这里——
+// 因为我们的请求统一用 `validateStatus: () => true`，HTTP 4xx/5xx 不会让 axios 抛错，
+// 走的是 envelope 解析路径。这里专门处理「拿不到任何 response」的退化情形：
+//   1. AxiosError 带 response → 仍尝试从 response.data 里挖 envelope.msg
+//   2. AxiosError 没 response（网络断 / 超时 / CORS）→ 用 describeStatus 兜底
+//   3. 不是 AxiosError 也不是 Error → fallback 兜底
 function readAxiosError(error: unknown, fallback: string) {
   if (axios.isAxiosError<ApiEnvelope<unknown>>(error)) {
     const envelope = error.response?.data;
-    if (envelope && typeof envelope === "object" && "msg" in envelope && envelope.code !== 0) {
-      return envelope.msg || describeStatus(error.response?.status, fallback);
+    if (envelope && typeof envelope === "object") {
+      const msg = typeof envelope.msg === "string" ? envelope.msg.trim() : "";
+      if (msg && msg !== "ok") return msg;
     }
     return describeStatus(error.response?.status, fallback);
   }
-  return error instanceof Error ? error.message : fallback;
+  if (error instanceof Error && error.message.trim()) return error.message;
+  return fallback;
 }
 
 function authHeaders(token: string, extra?: Record<string, string>): Record<string, string> {
@@ -111,8 +124,11 @@ function parseStreamChunk(chunk: string, onDelta: (value: string) => void) {
 
 export async function requestGeneration(token: string, config: AiConfig, prompt: string): Promise<GenerationResult> {
   const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
+  // 拆成两段：先做 axios 调用、只 catch「网络层失败」；然后解析 envelope
+  // 直接 throw 不再被外层 catch 重新包装吃掉 msg。
+  let response;
   try {
-    const response = await axios.post<ApiEnvelope<ImageProxyResult>>(
+    response = await axios.post<ApiEnvelope<ImageProxyResult>>(
       "/api/v1/images/generations",
       {
         prompt,
@@ -125,13 +141,19 @@ export async function requestGeneration(token: string, config: AiConfig, prompt:
         validateStatus: () => true,
       },
     );
-    if (response.data?.code !== 0) {
-      throw new Error(readEnvelopeError(response.data, "请求失败", response.status));
-    }
-    return parseImageResult(response.data.data);
   } catch (error) {
     throw new Error(readAxiosError(error, "请求失败"));
   }
+  if (!response.data || typeof response.data !== "object") {
+    throw new Error(describeStatus(response.status, "请求失败"));
+  }
+  if (response.data.code !== 0) {
+    // 后端 Fail() 写的 envelope.msg（例如「额度不足，请联系管理员」）直接给用户。
+    // console.error 是调试线索：万一某天又有人改坏了消息流，DevTools 能立刻看到原始 envelope。
+    console.error("/api/v1/images/generations 失败", response.data);
+    throw new Error(readEnvelopeError(response.data, "请求失败", response.status));
+  }
+  return parseImageResult(response.data.data);
 }
 
 export async function requestEdit(token: string, config: AiConfig, prompt: string, references: ReferenceImage[]): Promise<GenerationResult> {
@@ -141,8 +163,9 @@ export async function requestEdit(token: string, config: AiConfig, prompt: strin
   // 请求体只有几百字节，后端按 owner 校验后直接读磁盘转 multipart 上送。
   const allOnServer = references.length > 0 && references.every((ref) => Boolean(ref.storageKey));
   if (allOnServer) {
+    let response;
     try {
-      const response = await axios.post<ApiEnvelope<ImageProxyResult>>(
+      response = await axios.post<ApiEnvelope<ImageProxyResult>>(
         "/api/v1/images/edits",
         {
           prompt,
@@ -156,13 +179,17 @@ export async function requestEdit(token: string, config: AiConfig, prompt: strin
           validateStatus: () => true,
         },
       );
-      if (response.data?.code !== 0) {
-        throw new Error(readEnvelopeError(response.data, "请求失败", response.status));
-      }
-      return parseImageResult(response.data.data);
     } catch (error) {
       throw new Error(readAxiosError(error, "请求失败"));
     }
+    if (!response.data || typeof response.data !== "object") {
+      throw new Error(describeStatus(response.status, "请求失败"));
+    }
+    if (response.data.code !== 0) {
+      console.error("/api/v1/images/edits (JSON) 失败", response.data);
+      throw new Error(readEnvelopeError(response.data, "请求失败", response.status));
+    }
+    return parseImageResult(response.data.data);
   }
 
   // 兜底路径：有 reference 还没上传过（画布瞬时截屏 / 裁剪结果），走传统 multipart。
@@ -178,18 +205,23 @@ export async function requestEdit(token: string, config: AiConfig, prompt: strin
   const files = await Promise.all(references.map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
   files.forEach((file) => formData.append("image", file));
 
+  let response;
   try {
-    const response = await axios.post<ApiEnvelope<ImageProxyResult>>("/api/v1/images/edits", formData, {
+    response = await axios.post<ApiEnvelope<ImageProxyResult>>("/api/v1/images/edits", formData, {
       headers: authHeaders(token),
       validateStatus: () => true,
     });
-    if (response.data?.code !== 0) {
-      throw new Error(readEnvelopeError(response.data, "请求失败", response.status));
-    }
-    return parseImageResult(response.data.data);
   } catch (error) {
     throw new Error(readAxiosError(error, "请求失败"));
   }
+  if (!response.data || typeof response.data !== "object") {
+    throw new Error(describeStatus(response.status, "请求失败"));
+  }
+  if (response.data.code !== 0) {
+    console.error("/api/v1/images/edits (multipart) 失败", response.data);
+    throw new Error(readEnvelopeError(response.data, "请求失败", response.status));
+  }
+  return parseImageResult(response.data.data);
 }
 
 export async function requestImageQuestion(token: string, messages: ChatCompletionMessage[], onDelta: (text: string) => void) {
