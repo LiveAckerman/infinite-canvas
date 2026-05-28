@@ -17,6 +17,9 @@ type Props = {
   onDownloadZip: () => void;
   // 「全部启动」按钮的 loading 态
   starting?: boolean;
+  // 「下载 zip」按钮的 loading 态。zip 是流式拉，体积大时几秒到十几秒不等，
+  // 没 loading 用户以为按钮没生效会狂点。
+  downloading?: boolean;
 };
 
 // 批量任务列表项卡片。一眼看清这条 batch 的总体状态 + main / post 进度，并提供常用操作入口。
@@ -27,7 +30,7 @@ type Props = {
 //
 // 进度计算口径：(mainSuccess + postSuccess) / (mainTotal + postTotal)；
 // 没启用 post 时分母自然变成只算主条，跟 UI 描述行一致。
-export function BatchCard({ item, onOpen, onDelete, onStartAll, onDownloadZip, starting }: Props) {
+export function BatchCard({ item, onOpen, onDelete, onStartAll, onDownloadZip, starting, downloading }: Props) {
   const isTerminal = item.status === "success" || item.status === "partial" || item.status === "failed";
   const isPostWaiting = item.status === "post_waiting";
   const isQueued = item.status === "queued";
@@ -146,7 +149,11 @@ export function BatchCard({ item, onOpen, onDelete, onStartAll, onDownloadZip, s
         {/* 非主操作的「打开」入口：queued 状态主按钮是「全部启动」，还要给一个次要打开入口 */}
         {isQueued ? <Button onClick={onOpen}>打开</Button> : null}
         {isTerminal ? (
-          <Button icon={<Download className="size-3.5" />} onClick={onDownloadZip}>
+          <Button
+            icon={<Download className="size-3.5" />}
+            loading={downloading}
+            onClick={onDownloadZip}
+          >
             下载 zip
           </Button>
         ) : null}

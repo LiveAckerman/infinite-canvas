@@ -92,6 +92,8 @@ function AgentsWorkbench() {
   const [batchTemplateManagerOpen, setBatchTemplateManagerOpen] = useState(false);
   const [batchFromTemplateOpen, setBatchFromTemplateOpen] = useState(false);
   const [startingBatchId, setStartingBatchId] = useState<string>("");
+  // 「下载 zip」按钮的 loading 锁定：记下正在下载的 batchId，避免用户连点重复打包
+  const [downloadingBatchId, setDownloadingBatchId] = useState<string>("");
 
   const agentsQuery = useQuery({
     queryKey: AGENTS_QUERY_KEY,
@@ -430,10 +432,14 @@ function AgentsWorkbench() {
   };
 
   const handleDownloadBatchZip = async (id: string, name: string) => {
+    if (downloadingBatchId) return; // 同一时间只让一个下载在跑，防连点
+    setDownloadingBatchId(id);
     try {
       await downloadPipelineBatchZip(id, name || `pipeline-batch-${id.slice(-6)}`);
     } catch (error) {
       message.error(error instanceof Error ? error.message : "下载失败");
+    } finally {
+      setDownloadingBatchId("");
     }
   };
 
@@ -494,6 +500,7 @@ function AgentsWorkbench() {
               onStartAll={() => void handleStartAllForBatch(item.id)}
               onDownloadZip={() => void handleDownloadBatchZip(item.id, item.name)}
               starting={startingBatchId === item.id}
+              downloading={downloadingBatchId === item.id}
             />
           ))}
         </div>

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.0.33 - 2026-05-28
+
++ [新增] **批量任务列表卡「下载 zip」按钮加 loading 动画**：批量任务 Tab 列表卡的下载按钮之前没 loading 反馈，zip 流式打包大批次可能几秒到十几秒，用户狂点造成重复打包请求。现在 `BatchCard` 加 `downloading` prop，`agents/page.tsx` 用 `downloadingBatchId` state 锁定同时只允许一个 batch 下载，按钮 antd `loading={downloading}` 转圈显示；下载完成 / 失败自动解锁。batch detail 页顶栏「下载所有产物 (zip)」和单 run detail 页的「下载所有产物 (zip)」之前就有 loading state，本次确认一致。
+
 ## v0.0.32 - 2026-05-28
 
 + [新增] **批量任务里所有缩略图支持点击放大查看**：批量任务详情页里 ① 主条 `PipelineRunCard` 的「原图 + 每步产物」横排小方块（48px），② 后处理 `PostRunCard` 的「数据源 N 张」+「产物图」，原本都是裸 `<img>` 没法放大。现在统一换成 antd `<Image>`，每张卡内包一层 `<Image.PreviewGroup>` 串联本卡所有缩略图 —— 点任意一张弹出全屏预览浮层（带缩放 / 旋转 / 键盘 ←→ 切换），跟画布 / 生图工作台的预览体验一致。鼠标 hover 缩略图时光标变 `cursor-zoom-in` 提示可点击。
