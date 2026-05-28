@@ -25,6 +25,7 @@ import {
 
 import { PipelineRunCard } from "../../components/pipeline-run-card";
 import { RUNS_QUERY_KEY } from "../../hooks/use-pipeline-run-manager";
+import { imageUrl } from "@/services/image-storage";
 
 const BATCHES_QUERY_KEY = ["my-pipeline-batches"] as const;
 
@@ -570,43 +571,137 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
               title={!isMainAllDone ? "等待主条阶段完成" : undefined}
             >
               {detail.postRuns.map((run) => (
-                <div key={run.id} className="flex flex-col gap-2">
-                  <PipelineRunCard
-                    run={run}
-                    onOpen={() => openRun(run.id)}
-                    onDownload={() => {
-                      message.info("请到该后处理 run 详情页内下载单条 zip，或在批次终态时使用上方「下载所有产物」打包下载");
-                    }}
-                    onDelete={() => message.info("批量任务的 post run 不可单独删除，请删除整个批次")}
-                    onDuplicate={() => message.info("批量任务的 post run 不支持复制")}
-                    onSeedUploaded={() => {/* post run 的输入由 sources 决定，不允许替换 seed */}}
-                    onStart={() => {/* post run 单条启动入口走详情页 */}}
-                    selected={false}
-                    onSelectedChange={() => {/* batch 详情下不提供单条勾选 */}}
-                    eligible={false}
-                    downloading={false}
-                  />
-                  {/* failed / paused 状态的 post run 给个「重做」按钮：把这条 run + 它的 step 全部 reset 到 queued，
-                      调度器会自动捡起来跑（resolveAgentWithRetry 兜底 agents race）。
-                      idle / running / queued / success 不显示，避免误触。 */}
-                  {run.status === "failed" || run.status === "paused" ? (
-                    <Button
-                      size="small"
-                      type="primary"
-                      icon={<RefreshCw className="size-3.5" />}
-                      loading={retryingPostId === run.id}
-                      onClick={() => void handleRetryPostRun(run)}
-                      block
-                    >
-                      重做后处理「{run.steps[0]?.agentName || "未命名"}」
-                    </Button>
-                  ) : null}
-                </div>
+                <PostRunCard
+                  key={run.id}
+                  run={run}
+                  mainRuns={detail.mainRuns}
+                  retrying={retryingPostId === run.id}
+                  onOpen={() => openRun(run.id)}
+                  onRetry={() => void handleRetryPostRun(run)}
+                />
               ))}
             </div>
           )}
         </section>
       ) : null}
     </main>
+  );
+}
+
+// PostRunCard 专门给批量任务的 post run 用的简化卡片。
+//   - 跟 main run 不一样：post run 没有 seedKey，它的 references 来自 sourceRefs（指向同 batch
+//     里 main runs 的 step 产物）。所以这张卡不显示「待上传原图」UI，而是直接显示「使用 N 张主条产物」
+//     横排小缩略图；产物跑出来后展示在右侧（或下方）。
+//   - 不复用 PipelineRunCard 是因为它假设了 seedKey 单 seed 语义，强行复用要塞一堆 if branch，
+//     不如单写一个干净。
+function PostRunCard({
+  run,
+  mainRuns,
+  retrying,
+  onOpen,
+  onRetry,
+}: {
+  run: PipelineRun;
+  mainRuns: PipelineRun[];
+  retrying: boolean;
+  onOpen: () => void;
+  onRetry: () => void;
+}) {
+  // 解析 sourceRefs 到实际的图片 storageKey（已经成功的 main run 步骤产物 / seed）
+  const sourceKeys = (() => {
+    const keys: string[] = [];
+    for (const ref of run.sourceRefs || []) {
+      const main = mainRuns.find((m) => m.id === ref.runId);
+      if (!main) continue;
+      if (ref.stepIndex === -1) {
+        if (main.seedKey) keys.push(main.seedKey);
+      } else if (ref.stepIndex >= 0 && ref.stepIndex < main.steps.length) {
+        const step = main.steps[ref.stepIndex];
+        if (step.status === "success" && step.outputKey) keys.push(step.outputKey);
+      }
+    }
+    return keys;
+  })();
+  const step = run.steps[0]; // post run 永远是 single-step
+  const outputKey = step?.outputKey || "";
+  const agentName = step?.agentName || "未命名角色";
+
+  const statusPill = (() => {
+    switch (run.status) {
+      case "queued":
+        return <Tag color="blue" className="m-0">等待执行</Tag>;
+      case "running":
+        return <Tag color="blue" className="m-0">执行中…</Tag>;
+      case "paused":
+        return <Tag color="gold" className="m-0">已暂停</Tag>;
+      case "success":
+        return <Tag color="green" className="m-0">已完成</Tag>;
+      case "partial":
+        return <Tag color="orange" className="m-0">部分完成</Tag>;
+      case "failed":
+        return <Tag color="red" className="m-0">失败</Tag>;
+      default:
+        return <Tag className="m-0">待运行</Tag>;
+    }
+  })();
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-stone-200 bg-card p-3 dark:border-stone-800">
+      {/* 标题：角色名 + 状态 */}
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate text-sm font-semibold" title={`后处理 · ${agentName}`}>
+          后处理 · {agentName}
+        </span>
+        {statusPill}
+      </div>
+
+      {/* 数据源缩略图横排（小图叠放显示，避免占太多空间） */}
+      <div className="flex items-center gap-2">
+        <span className="shrink-0 text-[11px] text-stone-500 dark:text-stone-400">数据源 {sourceKeys.length} 张</span>
+        <div className="flex flex-1 items-center gap-1 overflow-x-auto">
+          {sourceKeys.length > 0 ? sourceKeys.slice(0, 8).map((key, idx) => (
+            <img
+              key={`${key}-${idx}`}
+              src={imageUrl(key)}
+              alt=""
+              className="size-10 shrink-0 rounded border border-stone-200 object-cover dark:border-stone-800"
+            />
+          )) : (
+            <span className="text-[11px] text-amber-600 dark:text-amber-400">⚠ 暂未解析到可用数据源（等待主条阶段完成）</span>
+          )}
+        </div>
+      </div>
+
+      {/* 产物 / 错误 */}
+      {outputKey ? (
+        <div className="overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
+          <img src={imageUrl(outputKey)} alt="产物" className="!h-32 w-full object-contain" />
+        </div>
+      ) : run.status === "failed" && step?.errorMessage ? (
+        <div className="rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] text-red-600 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
+          <span className="line-clamp-3">{step.errorMessage}</span>
+        </div>
+      ) : (
+        <div className="grid h-20 place-items-center rounded-md bg-stone-50 text-[11px] text-stone-400 dark:bg-stone-900">
+          {run.status === "running" ? "正在生成…" : "暂无产物"}
+        </div>
+      )}
+
+      {/* 操作按钮 */}
+      <div className="flex flex-wrap gap-1.5">
+        <Button size="small" onClick={onOpen}>打开详情</Button>
+        {run.status === "failed" || run.status === "paused" ? (
+          <Button
+            size="small"
+            type="primary"
+            icon={<RefreshCw className="size-3.5" />}
+            loading={retrying}
+            onClick={onRetry}
+          >
+            重做
+          </Button>
+        ) : null}
+      </div>
+    </div>
   );
 }

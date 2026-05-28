@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v0.0.30 - 2026-05-28
+
++ [修复] **批量任务的后处理 run 不应要求用户再上传原图，应该直接用配置好的 sources**：之前 batch detail 页里 post run 卡复用 `PipelineRunCard`，那个组件假设 single-seed 语义，看到 `run.seedKey===""` 直接进「待上传原图」UI，让用户用「上传 / 剪切板」按钮再传一次图 —— 但 post run 的输入本来就是用户在 BatchCreateModal 里配置好的 sources（指向同批 main runs 的 step 产物 / seed），runner 跑时已经会自动用 `resolvePostSourceKeys` 解析这些产物喂上游。前端 UI 完全错位。**修法**：batch detail 页内联一个专用的 `PostRunCard` 组件，跟 `PipelineRunCard` 不复用：① 标题区显示「后处理 · {角色名}」+ 状态 pill（不再有「待上传原图」状态，post run 永远不需要 seed）；② 中部显示「数据源 N 张」+ 横排叠放的小缩略图（最多 8 张，从 sourceRefs 实时解析主条产物得到）；③ 产物区显示成功后的输出图 / 失败时显示错误信息；④ 操作按钮区只有「打开详情」+ failed/paused 时的「重做」（带 RefreshCw 图标）。
++ [运维] 再次 reset `batch-ec3411e9` 的 2 条 failed post run 回 queued，等 v0.0.30 部署 + 用户刷新后调度器接管（这次是 sources 没问题 + agent 没问题 + UI 也不再要求上传 seed）。
+
 ## v0.0.29 - 2026-05-28
 
 + [新增] **批量任务详情页 failed / paused 的后处理 run 加「重做」按钮**：之前 batch detail 页里 post run 卡用 `PipelineRunCard` 渲染但传 `eligible={false}`，导致所有按钮（执行 / 复制 / 删除）全 disable。用户碰上 post run failed 时**完全没办法在 UI 上重试**，只能去 db / 单 run detail 页里手动 reset。现在 batch detail 页里给 `status === "failed" || status === "paused"` 的 post run 卡下方加一个蓝色「重做后处理「{角色名}」」按钮（带 `RefreshCw` 图标），点击后 reset 这条 run 的 status + steps[0] 状态到 queued/idle，PUT 写库 + 乐观更新 detail/list 两份 cache，调度器立刻接管开跑。配 v0.0.28 的 agents 闭包 retry 兜底，post run 失败后用户能一键救活。
