@@ -66,6 +66,56 @@
 - 数据库结构写到 `docs/backend-database.md`。
 - 文档不要写过期日期；除非用户明确要求记录具体时间。
 
+## CHANGELOG 写作风格（重要）
+
+CHANGELOG 是写给**普通用户**看的，不是开发笔记。每条目控制在 1-2 句话，不要展开成"根因 + 修法 + 文件名"的小论文。
+
+**禁止出现**：
+- 函数名、变量名（`CollectInUseImageKeys()`、`isGeneratingRef`）
+- 文件路径、组件名（`service/image_cleanup.go`、`PromptImproveBar`）
+- 接口路径、SQL 列名、表名（`POST /api/admin/storage/cleanup`、`generations.thumbnails`）
+- 技术名词（race condition、closure、debounce、reserve-then-confirm、AutoMigrate）
+- 调用链分析、内部架构说明
+
+**应该出现**：
+- 用户用得到的功能描述（点哪个按钮、看到什么效果）
+- 修复了什么样的"用起来不对劲"
+- 哪个页面 / 哪个入口（用 UI 上的中文名，不用代码里的英文）
+
+**坏例子**（v0.0.25 原版）：
+> `service/image_cleanup.go` 新增 `CollectInUseImageKeys()`，扫描 generations.thumbnails/references、canvases.data 递归 JSON 树……
+
+**好例子**（重写）：
+> 管理后台新增「存储管理」页，可以看到所有用户的图片占用情况，一键清理无用图片释放磁盘。普通用户单人图片上限 500MB，超出会提示先清理。
+
+需要技术细节的地方（root cause、文件位置、为什么这么改）写到 commit message 里，CHANGELOG 只保留用户面。
+
+## 部署流程（本项目专用，不要忘）
+
+线上服务器：`root@103.65.39.210`，SSH key `~/.ssh/id_ed25519_nopass`。
+镜像仓库：`ghcr.io/ljw0404/infinite-canvas`（私有；服务器有 read:packages PAT）。
+
+**标准发版流程**：
+
+1. 改完代码 + 自测后，按上述「CHANGELOG 写作风格」整理 `Unreleased`
+2. `VERSION` 升一位（语义 patch）
+3. 把 `CHANGELOG.md` 的 `## Unreleased` 改名成 `## v0.0.X - YYYY-MM-DD`，上方再补一个空 `## Unreleased`
+4. `git add -A && git commit -m "release: v0.0.X - 一句话总结" && git push origin main`
+5. **运行 `./deploy/deploy.sh`**（不要手敲 docker build / docker push / scp）
+
+`deploy/deploy.sh` 已经做好了完整流程（脚本里都有注释）：
+- 本地 `docker buildx build --platform linux/amd64`（镜像约 333MB）
+- `docker push` 增量到 ghcr（首次基线 ~3min，后续秒级）
+- ssh 到服务器：备份 data（自动保留最近 3 个）→ `docker compose pull` → `docker compose up -d` → 健康检查
+- ssh 调用全部带 keepalive + 3 次自动重试（中间路径偶尔切断会自愈）
+
+**常见踩坑（前人经验）**：
+- 本地用 ClashX 代理时，`docker push` 可能卡住 / `apt-get` 502。retry 一次通常能过；继续失败就切节点
+- `docker build` 拉基础镜像走 `daocloud` mirror（`~/.docker/daemon.json` 已配），不依赖代理
+- 服务器磁盘 100% 满了：① `data.bak.*` 累积（deploy.sh 已加自动保留最近 3 个）② docker image 累积（手动 `docker image prune -af`）③ build cache（`docker builder prune -af`）
+- ssh 长会话中途 `Connection closed by ...:22` 是常态，deploy.sh 已经处理，不用慌
+- 发版完去 https://infinite-canvas.lijiwang.top 验证一下，看 `/api/health` 和真实页面
+
 ## 发版本流程
 
 - 发版本时，先把 `CHANGELOG.md` 的 `Unreleased` 变更整理成新的版本记录，并保留空的 `Unreleased` 标题。

@@ -2,13 +2,30 @@
 
 ## Unreleased
 
+## v0.0.26 - 2026-05-28
+
++ [新增] 角色工作台新增「批量任务」：一次上传最多 9 张图，对所有图跑同一个流水线；跑完后可选「后处理」步骤，把多张产物再加工（例如统一上色、拼图、风格化）。
++ [新增] 批量任务可以保存成「批处理模板」，下次选模板 + 上传图片就能直接跑，不用每次重新配。
++ [新增] 批量任务完成后顶栏「下载所有产物 (zip)」一键打包下载，里面按主条 / 后处理分目录。
++ [新增] 后处理需要的某些图缺失（某条主条失败 / 某步还没跑）时会弹决策卡，可以选「继续执行（跳过缺失）」/「先去补救再回来」/「跳过后处理」。
++ [新增] 角色编辑窗口的参考图区域支持拖入图片、粘贴上传、从剪切板按钮取图，跟生图工作台一致。
+
++ [新增] **批量任务（Batch）+ 批处理模板**：`/agents` 加第三个 Tab「批量任务」，把「一次上传多张图 + 每张分配流水线模板 + 可选后处理 + 整批打包下载」全打通。
+  - **数据模型**：新表 `pipeline_batches`（id / user_id / name / total_count / status / post_enabled / post_name / 时间戳）+ `pipeline_batch_templates`（保存可复用的批处理配置）；现有 `pipeline_runs` 表加 4 个字段 `batch_id / kind / position / source_refs`，复用既有 runs 跑主条 + 后处理 runs（零数据迁移，老 run 走 kind="" 等价 main）。
+  - **执行流程**：用户「+ 新建批量任务」→ Modal 上传 1-9 张图 + 每张选 pipeline → 可选启用后处理（选 1-6 张主条产物作 sources + 选 1-10 个独立角色，每个角色用同一份 sources 独立跑一次产生独立产物，**不串联**）→ 整批 status="queued" + 所有 runs status="paused" → 列表卡上「全部启动」批量推到 queued → 调度器（cap=3）跑主条 → 全部主条 done 时后端 `UpdateBatchStatusAfterRunChange` 检查 sources 完整性 → 全 OK 自动推 post runs 进 queued / 有缺失把 batch 切到 `post_waiting` 等用户决策。
+  - **失败 sources 决策**：batch.status === `post_waiting` 时详情页弹出醒目卡片列出哪些 source 不可用（reason 中文友好）+ 三个按钮「继续执行（跳过缺失）」「我先去补救」「跳过后处理直接出 zip」+ 「🔄 重新检查 sources」。用户去主条 detail 重做失败步骤后回来点重新检查，sources 全齐自动推 post。
+  - **批处理模板**：可把「N 条主条选什么 pipeline + 后处理 sources/agents 配置」存成模板（用 itemIndex 而非 runId 作为 source 引用），下次「🔄 从模板创建」选模板 + 上传必须等于 itemCount 张图 → 一键启动 batch。三个独立 Modal：`BatchCreateModal`（自由配置）/ `BatchTemplateManagerModal`（CRUD）+ `BatchTemplateEditorModal`（编辑）/ `BatchFromTemplateModal`（基于模板创建）。
+  - **Zip 下载**：仅终态（success / partial / failed）启用。结构 `{batchName}_{yyMMdd}.zip → 01_main_{runName}/ ... + post_{postName}/sources/from-runXX-stepYY.ext + 01_{agent}.ext, ...`。流式 `archive/zip` 写，零内存压力。
+  - **调度器扩展**：`usePipelineRunManager` 加 post gate（post run 必须等同 batch 所有 main done 才 schedule），`invokeStep` 签名从单 `inputKey` 改成 `inputKeys[]`，post run 第一步把 sourceRefs 解析出的多张主条产物当 references；main run 永远只传 1 个元素，行为完全等价旧版。`runSingleStep` 详情页重做同样支持 post（不走 iterate 分支）。
+  - **后端 API**：`POST /api/pipeline-batches/me`（自由 / 从模板两种 body）/ `GET` 列表 + 详情 / `DELETE` 级联 / `POST .../decide-post` continue/skip / `POST .../recheck-post` / `GET .../zip`；`/api/pipeline-batch-templates/me` 全套 CRUD。
+  - **额度估算**：BatchCreateModal 顶部实时显示「主条 ΣstepCount + 后处理 agents 数」预估积分。
+  - **状态机**：batch 枚举 `queued | running | post_waiting | success | partial | failed`；polling 在 queued/running/post_waiting 时 3 秒拉一次列表 + 详情。
+
 ## v0.0.25 - 2026-05-28
 
-+ [新增] **图片存储治理：孤儿清理 + 级联删除 + 用户配额**：之前图片只增不减——画布节点删了、生成记录删了、素材删了，对应磁盘文件全留着；服务器 `data/uploads` 累积到 772MB / 393 张。本次三层治理一并落地：
-  - **后端 `service/image_cleanup.go`（新）**：核心是 `CollectInUseImageKeys()`，一次扫描 generations.thumbnails/references、canvases.data（递归 JSON 树）、assets.cover_url/url、prompts.cover_url、agents.avatar_url/reference_image_keys、agent_workstation_cards.reference_key/output_key、pipeline_runs.seed_key/steps[].output_key/manual_override_key/last_run_snapshot.input_key —— 拼出全库 in-use storageKey 集合。`FindOrphanImages()` 返回 in-use 集合外的图片（孤儿）+ 全库统计 + 按用户聚合的占用排名；`CleanupOrphanImages()` 实际执行删除。
-  - **级联删除（P1）**：`DeleteGeneration` / `DeleteCanvas` / `DeleteMyAsset` / `DeleteMyAgent` / `DeleteMyAgentWorkstationCard` / `DeleteMyPipelineRun` 删完主表记录后，把这条记录引用过的所有 storageKey 攒成数组，调 `CleanupImagesByKeysIfOrphan(userID, keys)`：扫一遍 in-use 集合，对其中已无引用的图片走 owner 校验后物理删除。被别处仍引用的图（比如同一张图加进了多个画布）会保留。
-  - **per-user 配额（P2 lite）**：`SaveImage` 上传前查询 `SUM(size) WHERE user_id=?`，超过 **500MB** 拒绝（admin 无限）。错误文案中文友好：「您的图片存储已达上限（500MB），请清理后再上传」。
-  - **管理后台「存储管理」页 `/admin/storage`**：仪表盘展示全库图片数 / 总占用 / 孤儿数 / 孤儿占比；表格列出每张孤儿（owner、类型、大小、创建时间）；按用户聚合的占用排名表；红色「清理全部孤儿」按钮带二次确认弹窗。新增接口 `GET /api/admin/storage/orphans` + `POST /api/admin/storage/cleanup`，仅管理员可调。
++ [新增] 管理后台新增「存储管理」页，能看到所有用户的图片占用排名，以及"已经没人在用的图片"，一键清理释放磁盘。
++ [新增] 普通用户图片总占用上限 500MB，超出会提示「您的图片存储已达上限（500MB），请清理后再上传」；管理员不受限。
++ [调整] 删除画布、生成记录、素材、角色、工作区卡片、流水线时，关联的图片会跟着自动清理（被多个地方引用的图保留）。以前删完只删了记录、图片留在服务器上一直占空间。
 
 ## v0.0.24 - 2026-05-28
 

@@ -60,6 +60,24 @@ type PipelineRunStep struct {
 	DurationMs        int                      `json:"durationMs,omitempty"`
 }
 
+// PipelineRunKind 标记这是「批量任务里的主条」「批量任务里的后处理」还是「独立的单条 run」。
+//   - "" / "main"：默认值，主条；批量里也用 "main"
+//   - "post"：批量任务里的后处理 run（共享一组 sources、单 step、整批跑完才上）
+type PipelineRunKind string
+
+const (
+	PipelineRunKindMain PipelineRunKind = "main"
+	PipelineRunKindPost PipelineRunKind = "post"
+)
+
+// PipelineRunSourceRef 后处理 run 第一步的 references 来源 ——
+// 从同 batch 内某条主条的某一步产物挑过来。
+// 仅 PipelineRun.Kind == "post" 时有意义。
+type PipelineRunSourceRef struct {
+	RunID     string `json:"runId"`     // 同 batch 内某条主条 run.id（创建 batch 时由后端把 itemIndex 转成 runId）
+	StepIndex int    `json:"stepIndex"` // -1 = 用主条 seed；0+ = 主条第 N 步的 outputKey
+}
+
 // PipelineRun 一次执行流程的完整记录。
 type PipelineRun struct {
 	ID               string            `json:"id" gorm:"primaryKey"`
@@ -69,8 +87,16 @@ type PipelineRun struct {
 	SeedKey          string            `json:"seedKey"`
 	Steps            []PipelineRunStep `json:"steps" gorm:"serializer:json"`
 	Status           PipelineRunStatus `json:"status" gorm:"index"`
-	CreatedAt        string            `json:"createdAt"`
-	UpdatedAt        string            `json:"updatedAt"`
+	// BatchID 非空表示属于一个 batch；空表示独立创建的单条 run（兼容历史数据）
+	BatchID string `json:"batchId" gorm:"index"`
+	// Kind 默认空 / "main" —— 主条；"post" —— 后处理 run
+	Kind PipelineRunKind `json:"kind"`
+	// Position 同 batch 内顺序，0..N-1 是主条，N..N+M-1 是 post run
+	Position int `json:"position"`
+	// SourceRefs 仅 post run 用：第一步的 references 从哪些主条产物来
+	SourceRefs []PipelineRunSourceRef `json:"sourceRefs" gorm:"serializer:json"`
+	CreatedAt  string                 `json:"createdAt"`
+	UpdatedAt  string                 `json:"updatedAt"`
 }
 
 // PipelineRunList 列表分页结果。

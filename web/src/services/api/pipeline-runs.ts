@@ -31,6 +31,15 @@ export type PipelineRunStep = {
   durationMs?: number;
 };
 
+// 「批次后处理」单条主条产物的引用。仅 PipelineRun.kind=="post" 时有意义：
+// 表示这条 post run 的 seed / 中间输入来自批次内哪条主条 run 的哪一步产物。
+//   - stepIndex = -1 → 取那条主条 run 的 seedKey
+//   - stepIndex >= 0 → 取那条主条 run 的 steps[stepIndex].outputKey
+export type PipelineRunSourceRef = {
+  runId: string;
+  stepIndex: number;
+};
+
 export type PipelineRun = {
   id: string;
   userId: string;
@@ -39,6 +48,17 @@ export type PipelineRun = {
   seedKey: string;
   steps: PipelineRunStep[];
   status: PipelineRunStatus;
+  // 所属批次 id。空字符串表示这条 run 是独立调用，不属于任何 pipeline_batches 行。
+  batchId: string;
+  // run 在批次内的角色：
+  //   - "main"：批次主条（用户传 seed → 跑模板）
+  //   - "post"：批次后处理（以多个 main run 的产物为输入再跑一遍）
+  //   - ""：老数据 / 独立 run 兼容值，视同 "main"
+  kind: "" | "main" | "post";
+  // run 在批次内的展示顺序：main 段从 0 开始递增；post 段从 0 开始递增。独立 run 一律 0。
+  position: number;
+  // 仅 kind=="post" 有效：这条 post run 用到的主条产物引用列表，顺序与 post 步骤 seed/extra 拼装一致。
+  sourceRefs: PipelineRunSourceRef[];
   createdAt: string;
   updatedAt: string;
 };

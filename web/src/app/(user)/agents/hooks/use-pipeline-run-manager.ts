@@ -11,6 +11,7 @@ import {
   saveMyPipelineRun,
   type PipelineRun,
   type PipelineRunListResponse,
+  type PipelineRunSourceRef,
   type PipelineRunStep,
 } from "@/services/api/pipeline-runs";
 import { useUserStore } from "@/stores/use-user-store";
@@ -168,6 +169,19 @@ export function usePipelineRunManager({ agents }: Props) {
       if (run.status !== "queued") continue;
       if (inflightIdsRef.current.size >= CONCURRENCY_CAP) break;
       if (inflightIdsRef.current.has(run.id)) continue;
+
+      // post run gate：同 batch 内所有 main run 必须 done 才能起跑。
+      // 后端会在 main 全 done 时主动把 post run 从 paused 改 queued，这里是本 tab 的兜底防御：
+      // 别 tab 推 cache 还没同步、看到老 main = running 时不要错跑 post。
+      if (run.kind === "post") {
+        const batchMains = items.filter((r) => r.batchId === run.batchId && r.kind === "main");
+        if (batchMains.length === 0) continue; // 异常：post 找不到对应 main，跳过让后端处理
+        const allMainDone = batchMains.every(
+          (r) => r.status === "success" || r.status === "partial" || r.status === "failed",
+        );
+        if (!allMainDone) continue;
+      }
+
       inflightIdsRef.current.add(run.id);
       void runRun(run.id);
     }
@@ -210,15 +224,32 @@ export function usePipelineRunManager({ agents }: Props) {
           await persistRun(current);
           continue;
         }
-        // 算输入：手动覆盖 > 上一步成功的 outputKey > seed
-        const inputKey = computeInputKey(current, i);
-        if (!inputKey) {
-          current = patchStep(current, i, {
-            status: "failed",
-            errorMessage: "缺少输入图（上一步还没成功，或没有上传原图）",
-          });
-          await persistRun(current);
-          continue;
+        // 算这一步的输入：main run 走原来的 computeInputKey 单张；
+        // post run 第一步走 sourceRefs 解析多张（post run 后端创建时只有 1 个 step，所以 i===0 时一定命中）
+        let inputKeys: string[];
+        if (current.kind === "post" && i === 0) {
+          const allItems = queryClient.getQueryData<PipelineRunListResponse>(RUNS_QUERY_KEY)?.items || [];
+          const batchMains = allItems.filter((r) => r.batchId === current.batchId && r.kind === "main");
+          inputKeys = resolvePostSourceKeys(current.sourceRefs || [], batchMains);
+          if (inputKeys.length === 0) {
+            current = patchStep(current, i, {
+              status: "failed",
+              errorMessage: "后处理 sources 全部缺失（主条对应步骤未生成产物或主条已被删除）",
+            });
+            await persistRun(current);
+            continue;
+          }
+        } else {
+          const inputKey = computeInputKey(current, i);
+          if (!inputKey) {
+            current = patchStep(current, i, {
+              status: "failed",
+              errorMessage: "缺少输入图（上一步还没成功，或没有上传原图）",
+            });
+            await persistRun(current);
+            continue;
+          }
+          inputKeys = [inputKey];
         }
         // 标记为 running 推一次
         current = patchStep(current, i, { status: "running", errorMessage: undefined });
@@ -226,44 +257,14 @@ export function usePipelineRunManager({ agents }: Props) {
         // 跑
         const startedAt = performance.now();
         try {
-          const composedPrompt = step.extraNote.trim()
-            ? `${agent.systemPrompt.trim()}\n\n补充说明：${step.extraNote.trim()}`
-            : agent.systemPrompt.trim();
-          const references: ReferenceImage[] = [];
-          for (const key of agent.referenceImageKeys || []) {
-            if (!key) continue;
-            references.push({
-              id: `agent-ref-${agent.id}-${key}`,
-              name: `${agent.name}-参考图`,
-              type: "image/*",
-              dataUrl: imageUrl(key),
-              storageKey: key,
-            });
-          }
-          references.push({
-            id: `pipeline-step-input-${step.stepId}`,
-            name: `步骤 ${i + 1} 输入`,
-            type: "image/*",
-            dataUrl: imageUrl(inputKey),
-            storageKey: inputKey,
-          });
-          const config = {
-            size: agent.defaultSize || defaultConfig.size,
-            quality: agent.defaultQuality || defaultConfig.quality,
-            count: "1",
-          };
-          const res = references.length
-            ? await requestEdit(token, config, composedPrompt, references)
-            : await requestGeneration(token, config, composedPrompt);
-          const first = res.images[0];
-          if (!first) throw new Error("接口没有返回图片");
-          const stored = await uploadImage(first.dataUrl);
+          const result = await invokeStep(token, agent, step.extraNote, inputKeys, i);
+          // lastRunSnapshot.inputKey 字段仍是单值。多张时存 join，便于后续做 stale 判断
           current = patchStep(current, i, {
             status: "success",
-            outputKey: stored.storageKey,
+            outputKey: result.outputKey,
             errorMessage: undefined,
             durationMs: Math.round(performance.now() - startedAt),
-            lastRunSnapshot: { inputKey, extraNote: step.extraNote },
+            lastRunSnapshot: { inputKey: inputKeys.join(","), extraNote: step.extraNote },
           });
           await persistRun(current);
         } catch (error) {
@@ -403,29 +404,45 @@ export function usePipelineRunManager({ agents }: Props) {
       return;
     }
 
-    // 选输入：默认走「上游产物 / seed / 手动覆盖」(restart 路径)
-    const upstreamInputKey = computeInputKey(run, stepIndex);
-    const lastSnap = step.lastRunSnapshot;
-    const lastWasIterate = lastSnap?.inputSource === "iterate";
-    const extraNoteChanged = Boolean(lastSnap) && lastSnap!.extraNote !== step.extraNote;
-    // 迭代微调触发条件：
-    //   - 本步已有 outputKey（必须有「上一次的产物」可以做底）
-    //   - 用户填了附加说明（trim 后非空）
-    //   - 附加说明跟上次跑时的 snapshot 不一样（否则没必要再跑）
-    //   - 「上次本身就是 iterate」或「上次是 upstream 模式但 upstream 至今没变」
-    //     （后者意味着用户没换覆盖图 / 上游没动 → 是典型「我想在产物上加点料」场景）
-    const iterateOnOwnOutput = Boolean(step.outputKey)
-      && step.extraNote.trim() !== ""
-      && extraNoteChanged
-      && Boolean(lastSnap)
-      && (lastWasIterate || lastSnap!.inputKey === upstreamInputKey);
-    const inputKey: string = iterateOnOwnOutput ? (step.outputKey as string) : upstreamInputKey;
-    const inputSource: "upstream" | "iterate" = iterateOnOwnOutput ? "iterate" : "upstream";
+    // 选输入：
+    //   - post run 第一步（post 永远只有 1 步）→ 走 sourceRefs 解析多张
+    //   - 其它情况 → 「上游产物 / seed / 手动覆盖」(restart 路径) + 可能的迭代微调
+    let inputKeys: string[];
+    let inputSource: "upstream" | "iterate" = "upstream";
+    if (run.kind === "post" && stepIndex === 0) {
+      const allItems = queryClient.getQueryData<PipelineRunListResponse>(RUNS_QUERY_KEY)?.items || [];
+      const batchMains = allItems.filter((r) => r.batchId === run.batchId && r.kind === "main");
+      inputKeys = resolvePostSourceKeys(run.sourceRefs || [], batchMains);
+      if (inputKeys.length === 0) {
+        applyStepPatchOptimistically(runId, stepIndex, { status: "failed", errorMessage: "后处理 sources 全部缺失" });
+        void persistRun(patchStep(run, stepIndex, { status: "failed", errorMessage: "后处理 sources 全部缺失" }));
+        return;
+      }
+    } else {
+      const upstreamInputKey = computeInputKey(run, stepIndex);
+      const lastSnap = step.lastRunSnapshot;
+      const lastWasIterate = lastSnap?.inputSource === "iterate";
+      const extraNoteChanged = Boolean(lastSnap) && lastSnap!.extraNote !== step.extraNote;
+      // 迭代微调触发条件：
+      //   - 本步已有 outputKey（必须有「上一次的产物」可以做底）
+      //   - 用户填了附加说明（trim 后非空）
+      //   - 附加说明跟上次跑时的 snapshot 不一样（否则没必要再跑）
+      //   - 「上次本身就是 iterate」或「上次是 upstream 模式但 upstream 至今没变」
+      //     （后者意味着用户没换覆盖图 / 上游没动 → 是典型「我想在产物上加点料」场景）
+      const iterateOnOwnOutput = Boolean(step.outputKey)
+        && step.extraNote.trim() !== ""
+        && extraNoteChanged
+        && Boolean(lastSnap)
+        && (lastWasIterate || lastSnap!.inputKey === upstreamInputKey);
+      const inputKey: string = iterateOnOwnOutput ? (step.outputKey as string) : upstreamInputKey;
+      inputSource = iterateOnOwnOutput ? "iterate" : "upstream";
 
-    if (!inputKey) {
-      applyStepPatchOptimistically(runId, stepIndex, { status: "failed", errorMessage: "缺少输入图（上一步没成功，或没有原图）" });
-      void persistRun(patchStep(run, stepIndex, { status: "failed", errorMessage: "缺少输入图（上一步没成功，或没有原图）" }));
-      return;
+      if (!inputKey) {
+        applyStepPatchOptimistically(runId, stepIndex, { status: "failed", errorMessage: "缺少输入图（上一步没成功，或没有原图）" });
+        void persistRun(patchStep(run, stepIndex, { status: "failed", errorMessage: "缺少输入图（上一步没成功，或没有原图）" }));
+        return;
+      }
+      inputKeys = [inputKey];
     }
 
     // 1. 乐观标 running：detail / list 两份 cache 一起改，UI 立刻出 loader
@@ -435,14 +452,14 @@ export function usePipelineRunManager({ agents }: Props) {
 
     const startedAt = performance.now();
     try {
-      const result = await invokeStep(token, agent, step.extraNote, inputKey, stepIndex);
+      const result = await invokeStep(token, agent, step.extraNote, inputKeys, stepIndex);
       // 2. 立刻把产物替换上（用户立刻能看到新图，不用等 PUT 回来）
       const successPatch: Partial<PipelineRunStep> = {
         status: "success",
         outputKey: result.outputKey,
         errorMessage: undefined,
         durationMs: Math.round(performance.now() - startedAt),
-        lastRunSnapshot: { inputKey, extraNote: step.extraNote, inputSource },
+        lastRunSnapshot: { inputKey: inputKeys.join(","), extraNote: step.extraNote, inputSource },
       };
       applyStepPatchOptimistically(runId, stepIndex, successPatch);
       // 拉最新缓存（已含用户可能在 invokeStep 期间改的附加说明 / 角色 / 覆盖图）PUT 回库
@@ -482,7 +499,9 @@ export function usePipelineRunManager({ agents }: Props) {
 }
 
 // 内部执行一次图生图 → 上传产物，返回新 storageKey。封装来给 runRun / runSingleStep 共用。
-async function invokeStep(token: string, agent: Agent, extraNote: string, inputKey: string, index: number): Promise<{ outputKey: string }> {
+// inputKeys 是这一步要喂给上游的产物 storageKey 数组：main run 永远只传 1 张；
+// post run 第一步可能传多张（同 batch 各 main run 的指定步产物）。
+async function invokeStep(token: string, agent: Agent, extraNote: string, inputKeys: string[], index: number): Promise<{ outputKey: string }> {
   const composedPrompt = extraNote.trim()
     ? `${agent.systemPrompt.trim()}\n\n补充说明：${extraNote.trim()}`
     : agent.systemPrompt.trim();
@@ -497,13 +516,17 @@ async function invokeStep(token: string, agent: Agent, extraNote: string, inputK
       storageKey: key,
     });
   }
-  references.push({
-    id: `pipeline-step-input-${index}`,
-    name: `步骤 ${index + 1} 输入`,
-    type: "image/*",
-    dataUrl: imageUrl(inputKey),
-    storageKey: inputKey,
-  });
+  for (let i = 0; i < inputKeys.length; i += 1) {
+    const key = inputKeys[i];
+    if (!key) continue;
+    references.push({
+      id: `pipeline-step-input-${index}-${i}`,
+      name: `输入 ${i + 1}`,
+      type: "image/*",
+      dataUrl: imageUrl(key),
+      storageKey: key,
+    });
+  }
   const config = {
     size: agent.defaultSize || defaultConfig.size,
     quality: agent.defaultQuality || defaultConfig.quality,
@@ -516,6 +539,25 @@ async function invokeStep(token: string, agent: Agent, extraNote: string, inputK
   if (!first) throw new Error("接口没有返回图片");
   const stored = await uploadImage(first.dataUrl);
   return { outputKey: stored.storageKey };
+}
+
+// 解析 post run 的 sourceRefs：把每个 ref 指向的「主条 runId + stepIndex」翻译成实际的 storageKey 数组。
+//   - stepIndex === -1 → 用那条 main run 的 seedKey
+//   - stepIndex >= 0  → 用那条 main run.steps[stepIndex].outputKey（必须是 success 且非空）
+// 找不到对应主条 / 步骤未成功 / outputKey 为空 → 该 ref 静默忽略；调用方根据剩余 keys 数量判断是否报错。
+function resolvePostSourceKeys(sourceRefs: PipelineRunSourceRef[], mainRuns: PipelineRun[]): string[] {
+  const keys: string[] = [];
+  for (const ref of sourceRefs) {
+    const mainRun = mainRuns.find((r) => r.id === ref.runId);
+    if (!mainRun) continue;
+    if (ref.stepIndex === -1) {
+      if (mainRun.seedKey) keys.push(mainRun.seedKey);
+    } else if (ref.stepIndex >= 0 && ref.stepIndex < mainRun.steps.length) {
+      const step = mainRun.steps[ref.stepIndex];
+      if (step.status === "success" && step.outputKey) keys.push(step.outputKey);
+    }
+  }
+  return keys;
 }
 
 // 算某步当前应该用的输入 key：手动覆盖 > 上一步 outputKey（必须 success） > seed（第一步）

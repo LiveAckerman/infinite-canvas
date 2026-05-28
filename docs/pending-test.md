@@ -343,3 +343,25 @@
   - 多 tab 不互踩：Tab A 跑一条 run（updatedAt 持续刷新），Tab B 同账号打开 `/agents` 看到这条 run 是「运行中」**不会接管**（因为 Tab B 的 sessionStorage 没标记 + Tab A 持续更新 updatedAt < 5min）。Tab A 跑完后 Tab B 仍能看到结果。
   - 跨设备孤儿兜底：A 设备跑了一条 run 然后断电（极端），B 设备打开 `/agents` 5+ 分钟后会自动接管。短于 5 分钟内不接管（因为有可能 A 还活着）。
   - 全程不需要手动点「重试 / 续跑」按钮 — 用户的 mental model 就是「刷新后流水线继续跑」。
+- 批量任务（Batch）端到端：
+  - **入口**：`/agents` 顶部 Tab 多出「批量任务」，切过去顶部有 3 个按钮「+ 新建批量任务」/ 「🔄 从模板创建」/ 「📋 批处理模板」。
+  - **新建批量任务**：点「+ 新建批量任务」开 Modal。上传 9 张图（拖入 / 多选上传都试，超过 9 张自动截断 + toast）；每行选不同 pipeline 模板，点「应用同一模板到全部」也能一键批量设置；勾选「启用后处理」展开 sources（按主条勾 + Seed/步 N radio 选）+ agents 列表（chip 形式，去重，最多 10 个）；底部实时显示「预估积分」；点「启动批量任务」创建成功后跳详情页。
+  - **整批 paused 等用户启动**：刚创建的 batch 卡片状态是灰色「待启动」，所有 main run 都 paused。点列表卡上的「▶ 全部启动」（或详情页顶栏同名按钮）→ 所有 main runs 一次性 PUT status=queued → 调度器按 cap=3 接管开跑 → 卡片状态变蓝色「运行中 N/M」。
+  - **进度可见**：列表卡显示「mainSuccess / mainTotal 成功」+ 进度条；详情页 polling 3 秒/次（直到终态停止）。
+  - **后处理 sources 全 OK 自动启动**：所有 main runs done（success / partial / failed 都算）→ 后端 `UpdateBatchStatusAfterRunChange` 检查 sources → 全 OK → 把所有 post runs 推到 queued + batch.status="running" → 卡片状态继续显示「运行中」。**网络 console 应该看到一次 PUT 把 batch.status 改成 running 同时 post runs 改 queued**。
+  - **sources 缺失走决策卡**：在一条主条 detail 页故意让某步失败（例如把后端 ai-config 临时停用让上游 503），让批量任务有一条 main 部分失败 → 等主条全 done → batch.status 变 `post_waiting` → 详情页弹决策卡显示缺失明细（中文 reason，如「该主条第 2 步失败」/「该主条第 2 步还没跑」）。
+    - 点「继续执行（跳过缺失）」→ post runs 进 queued，runner 跑时 sources 解析后缺失的张数被静默跳过（剩下能用的张数仍传上游）；若 sources 全部缺失，post run 自动 fail 并写 errorMessage「后处理 sources 全部缺失」。
+    - 点「我先去补救」→ 卡片前端隐藏（hint bar 提示「去对应主条 detail 重做该步骤，回来后点【重新检查】」）；用户去主条 detail 重做失败步骤；回到 batch detail 点「🔄 重新检查 sources」按钮，全 OK 立刻推 post 进 queued + batch.status="running"，仍有缺失则刷新缺失列表。
+    - 点「跳过后处理」→ 弹 antd Modal.confirm 二次确认 → 后端删所有 post runs（+ CleanupImagesByKeysIfOrphan）+ batch.status 按主条最终状态计算（success / partial / failed）→ 详情页变终态 + zip 解锁。
+  - **「后处理 = 每个 agent 独立用 sources 跑一次」**：勾选 sources = 主条 1.步 2 + 主条 5.seed + 主条 9 最终；选 agents = 拼图大师 + 风格化 + 上色 → batch 创建后 detail 页能看到 **3 条 post runs**（每个 agent 一条），都是 single-step；主条全 done 后 3 条并行（cap=3 限制），各自调上游一次，每个产生一张独立产物，**不串联**。
+  - **下载 zip**：终态后顶栏「下载所有产物 (zip)」按钮可点。zip 解压能看到 `01_main_{runName}/00_seed.png + 01_{agent}.png + ...`、`02_main_{runName}/...`、...、`09_main_{runName}/...`、`post_{postName}/sources/from-run01-step2.png + ...` + `post_{postName}/01_{agent1}.png + 02_{agent2}.png + ...`（每个 post run 的产物平铺）。
+  - **删除整批**：列表卡 / 详情页删除按钮弹 confirm，后端级联删 batch + 所有 main + post runs，清理 seed / step.outputKey / manualOverrideKey / lastRunSnapshot.inputKey 等图片（如果别处没在引用）。删完跳回 `/agents` 批量任务 Tab。
+- 批处理模板：
+  - **新建模板**：「📋 批处理模板」开 manager Modal → 「新建模板」开 editor Modal。填名字（≤30）+ 描述（≤200）+ 主条数 1~9（每行选 pipeline + 默认名字）+ 可选启用后处理（sources 用 itemIndex 选，不绑定具体 run）+ agents 列表。保存后回 manager 列表。
+  - **CRUD**：编辑 / 复制（生成「X 副本」一行）/ 删除（confirm）。
+  - **从模板创建 batch**：「🔄 从模板创建」Modal 选模板 → 显示模板预览（主条数 + 后处理摘要）+ 必须上传 **正好** template.itemCount 张图，每个槽位下方显示「主条 N: {item.name} (用 {pipelineName})」让用户分辨上传到哪个槽。全传齐才能点「启动」。后端把 itemIndex 转 runId 后创建 batch + runs。
+  - **模板失效**：把模板里某条 pipeline 删除 / 某个 agent 删除后再用这个模板创建 batch → 后端校验失败，前端 toast 「该模板引用了不存在的模板 / 角色，请编辑模板替换」。用户编辑模板替换后即可正常用。
+- 批量任务调度器 gate：
+  - 在 Tab A 创建批量 + 全部启动 → 主条还在跑时，Tab B 同账号同时打开 `/agents`，**绝对不会**抢跑同 batch 的 post run（post run 的 status 此时是 paused，根本不会进 queued）。
+  - 主条全 done 后由后端推 post 进 queued，调度器才会拿起来跑。前端 gate 是双重保险：即便缓存里 post 已经 queued 但 main 还没全 done（极少 case），前端也跳过不跑。
+  - post run 详情页（即 `/agents/runs/{postRunId}`）只有 1 个 step，「输入」缩略框显示多张（sources 解析出的产物），不是单张。点「重做」走 sourceRefs 不走 iterate 分支。

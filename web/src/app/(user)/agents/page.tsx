@@ -1,9 +1,10 @@
 "use client";
 
-import { History, Plus, Search } from "lucide-react";
+import { FolderCog, History, Layers, Plus, Search } from "lucide-react";
 import { App, Button, Empty, Input, Modal, Tabs, Tag } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRouter } from "next/navigation";
 
 import { RequireAuth } from "@/components/require-auth";
 import { deleteMyAgent, fetchMyAgents, saveMyAgent, type Agent, type AgentListResponse } from "@/services/api/agents";
@@ -14,25 +15,47 @@ import {
   type AgentWorkstationCard,
   type AgentWorkstationCardListResponse,
 } from "@/services/api/agent-workstations";
+import {
+  deleteMyPipelineBatch,
+  downloadPipelineBatchZip,
+  fetchMyPipelineBatches,
+  type PipelineBatchDetail,
+  type PipelineBatchListResponse,
+} from "@/services/api/pipeline-batches";
+import { fetchMyPipelineBatchTemplates } from "@/services/api/pipeline-batch-templates";
+import { fetchMyPipelines, type Pipeline } from "@/services/api/pipelines";
+import {
+  saveMyPipelineRun,
+  type PipelineRun,
+} from "@/services/api/pipeline-runs";
 import { useUserStore } from "@/stores/use-user-store";
 
 import { AgentEditModal, type AgentFormValues } from "./components/agent-edit-modal";
 import { AgentLibraryCard } from "./components/agent-library-card";
 import { AgentRecordsDrawer } from "./components/agent-records-drawer";
 import { AgentWorkstation, type WorkstationCardPatch } from "./components/agent-workstation";
+import { BatchCard } from "./components/batch-card";
+import { BatchCreateModal } from "./components/batch-create-modal";
+import { BatchFromTemplateModal } from "./components/batch-from-template-modal";
+import { BatchTemplateManagerModal, BATCH_TEMPLATES_QUERY_KEY } from "./components/batch-template-manager-modal";
 import { PipelineMode } from "./components/pipeline-mode";
 
-// 「并行 / 流水线」模式偏好，localStorage 持久化（轻量偏好不上云）。
+// 「并行 / 流水线 / 批量任务」模式偏好，localStorage 持久化（轻量偏好不上云）。
 const MODE_STORAGE_KEY = "infinite-canvas:agents:mode";
-type WorkbenchMode = "parallel" | "pipeline";
+type WorkbenchMode = "parallel" | "pipeline" | "batch";
 function loadMode(): WorkbenchMode {
   if (typeof window === "undefined") return "parallel";
-  return window.localStorage.getItem(MODE_STORAGE_KEY) === "pipeline" ? "pipeline" : "parallel";
+  const v = window.localStorage.getItem(MODE_STORAGE_KEY);
+  if (v === "pipeline") return "pipeline";
+  if (v === "batch") return "batch";
+  return "parallel";
 }
 
 const WORKSTATION_CARDS_QUERY_KEY = ["my-workstation-cards"] as const;
 
 const AGENTS_QUERY_KEY = ["my-agents"] as const;
+const PIPELINES_QUERY_KEY = ["my-pipelines"] as const;
+const BATCHES_QUERY_KEY = ["my-pipeline-batches"] as const;
 
 export default function AgentsPage() {
   return (
@@ -43,8 +66,9 @@ export default function AgentsPage() {
 }
 
 function AgentsWorkbench() {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const queryClient = useQueryClient();
+  const router = useRouter();
   const token = useUserStore((state) => state.token);
   const userId = useUserStore((state) => state.user?.id || "");
   const [keyword, setKeyword] = useState("");
@@ -56,18 +80,33 @@ function AgentsWorkbench() {
   const [recordsAgentFilter, setRecordsAgentFilter] = useState<string>("");
   const [recordsPage, setRecordsPage] = useState(1);
   const [recordsRefreshKey, setRecordsRefreshKey] = useState(0);
-  // 顶部模式：并行 vs 流水线。localStorage 持久化。
+  // 顶部模式：并行 / 流水线 / 批量任务。localStorage 持久化。
   const [mode, setMode] = useState<WorkbenchMode>(() => loadMode());
   useEffect(() => {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(MODE_STORAGE_KEY, mode);
   }, [mode]);
 
+  // 批量任务相关：3 个 Modal 开关 + 「全部启动」单条 loading 标识（用 batchId 标定）
+  const [batchCreateOpen, setBatchCreateOpen] = useState(false);
+  const [batchTemplateManagerOpen, setBatchTemplateManagerOpen] = useState(false);
+  const [batchFromTemplateOpen, setBatchFromTemplateOpen] = useState(false);
+  const [startingBatchId, setStartingBatchId] = useState<string>("");
+
   const agentsQuery = useQuery({
     queryKey: AGENTS_QUERY_KEY,
     queryFn: () => fetchMyAgents(token),
     enabled: Boolean(token),
   });
+
+  // 批处理模板列表：从模板创建 Modal 用，跟「批处理模板」管理 Modal 共享 cache。
+  // 仅在 batch tab 激活时启用，减少 list 请求。
+  const batchTemplatesQuery = useQuery({
+    queryKey: BATCH_TEMPLATES_QUERY_KEY,
+    queryFn: () => fetchMyPipelineBatchTemplates(token),
+    enabled: Boolean(token) && mode === "batch",
+  });
+  const batchTemplates = batchTemplatesQuery.data?.items || [];
 
   const saveMutation = useMutation({
     mutationFn: (payload: Partial<Agent>) => saveMyAgent(token, payload),
@@ -294,6 +333,174 @@ function AgentsWorkbench() {
     </aside>
   );
 
+  // ====== 批量任务 Tab 数据 ======
+
+  // pipelines：BatchCreateModal / BatchTemplateManagerModal 都要传 pipelines（让用户从模板中挑）
+  const pipelinesQuery = useQuery({
+    queryKey: PIPELINES_QUERY_KEY,
+    queryFn: () => fetchMyPipelines(token),
+    enabled: Boolean(token),
+  });
+  const pipelinesForBatch: Pipeline[] = pipelinesQuery.data?.items || [];
+
+  // 列表 query：mode === "batch" 时启用；仅在列表里至少一条 batch 处于活跃状态时 polling
+  const batchesQuery = useQuery({
+    queryKey: BATCHES_QUERY_KEY,
+    queryFn: () => fetchMyPipelineBatches(token),
+    enabled: Boolean(token) && mode === "batch",
+    refetchInterval: (query) => {
+      const data = query.state.data as PipelineBatchListResponse | undefined;
+      const hasActive = (data?.items || []).some((item) => (
+        item.status === "queued" || item.status === "running" || item.status === "post_waiting"
+      ));
+      return hasActive ? 3000 : false;
+    },
+  });
+  const batchesList = batchesQuery.data?.items || [];
+
+  const deleteBatchMutation = useMutation({
+    mutationFn: (id: string) => deleteMyPipelineBatch(token, id),
+    onSuccess: (_, id) => {
+      queryClient.setQueryData<PipelineBatchListResponse>(BATCHES_QUERY_KEY, (old) => {
+        if (!old) return old;
+        return { ...old, items: old.items.filter((item) => item.id !== id), total: Math.max(0, old.total - 1) };
+      });
+      message.success("已删除批量任务");
+    },
+    onError: (error) => {
+      message.error(error instanceof Error ? error.message : "删除失败");
+    },
+  });
+
+  // 「全部启动」：把目标 batch 的所有 main run 从 paused → queued（清旧产物，与 pipeline-mode 重置语义一致）
+  // 列表卡片不直接持有 mainRuns，需先 fetch detail 拿到 main runs 列表再批量 PUT。
+  const handleStartAllForBatch = async (batchId: string) => {
+    setStartingBatchId(batchId);
+    try {
+      const detail = await queryClient.fetchQuery({
+        queryKey: ["my-pipeline-batch", batchId],
+        queryFn: () => import("@/services/api/pipeline-batches").then((m) => m.fetchMyPipelineBatch(token, batchId)),
+      });
+      const mains = detail.mainRuns;
+      let started = 0;
+      for (const run of mains) {
+        const next: PipelineRun = {
+          ...run,
+          status: "queued",
+          steps: run.steps.map((step) => ({
+            ...step,
+            status: "idle",
+            outputKey: undefined,
+            errorMessage: undefined,
+            durationMs: undefined,
+            lastRunSnapshot: undefined,
+          })),
+        };
+        try {
+          await saveMyPipelineRun(token, next);
+          started += 1;
+        } catch {
+          // 单条失败不阻断
+        }
+      }
+      queryClient.invalidateQueries({ queryKey: BATCHES_QUERY_KEY });
+      queryClient.invalidateQueries({ queryKey: ["my-pipeline-batch", batchId] });
+      queryClient.invalidateQueries({ queryKey: ["my-pipeline-runs"] });
+      if (started > 0) {
+        message.success(`已启动 ${started} 条主条`);
+      } else {
+        message.error("启动失败");
+      }
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "启动失败");
+    } finally {
+      setStartingBatchId("");
+    }
+  };
+
+  const handleDeleteBatch = (id: string, name: string) => {
+    modal.confirm({
+      title: "删除批量任务",
+      content: `确定删除「${name || "未命名批次"}」吗？该批次下所有 main / post run 会一并被删，产物图本身保留在图床里。`,
+      okText: "删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: () => deleteBatchMutation.mutate(id),
+    });
+  };
+
+  const handleDownloadBatchZip = async (id: string, name: string) => {
+    try {
+      await downloadPipelineBatchZip(id, name || `pipeline-batch-${id.slice(-6)}`);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "下载失败");
+    }
+  };
+
+  const handleBatchCreated = (detail: PipelineBatchDetail) => {
+    queryClient.invalidateQueries({ queryKey: BATCHES_QUERY_KEY });
+    setBatchCreateOpen(false);
+    setBatchFromTemplateOpen(false);
+    message.success("已创建批量任务");
+    // 直接跳到新建批次详情页
+    router.push(`/agents/batches/${detail.batch.id}`);
+  };
+
+  // 批量任务 Tab 内容
+  const batchTabContent = (
+    <div className="flex flex-col gap-3">
+      {/* 顶部工具栏 */}
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-stone-200 bg-card p-3 shadow-sm dark:border-stone-800">
+        <Button
+          type="primary"
+          icon={<Plus className="size-4" />}
+          onClick={() => setBatchCreateOpen(true)}
+        >
+          新建批量任务
+        </Button>
+        <Button
+          icon={<Layers className="size-4" />}
+          onClick={() => setBatchFromTemplateOpen(true)}
+          title="从已保存的批处理模板快速创建一个批次"
+        >
+          从模板创建
+        </Button>
+        <Button
+          icon={<FolderCog className="size-4" />}
+          onClick={() => setBatchTemplateManagerOpen(true)}
+        >
+          批处理模板
+        </Button>
+      </div>
+
+      {/* 列表 */}
+      {batchesQuery.isLoading ? (
+        <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-stone-300 text-sm text-stone-500 dark:border-stone-700">加载中…</div>
+      ) : batchesList.length === 0 ? (
+        <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-stone-300 p-10 text-center dark:border-stone-700">
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description={<div className="text-sm text-stone-500 dark:text-stone-400">还没有批量任务，点上方按钮创建</div>}
+          />
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {batchesList.map((item) => (
+            <BatchCard
+              key={item.id}
+              item={item}
+              onOpen={() => router.push(`/agents/batches/${item.id}`)}
+              onDelete={() => handleDeleteBatch(item.id, item.name)}
+              onStartAll={() => void handleStartAllForBatch(item.id)}
+              onDownloadZip={() => void handleDownloadBatchZip(item.id, item.name)}
+              starting={startingBatchId === item.id}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
   // 并行模式工作区 —— 抽成一个 JSX 片段，作为右侧 Tab 之一
   const parallelTabContent = (
     <div className="flex flex-col gap-3">
@@ -357,7 +564,9 @@ function AgentsWorkbench() {
         <p className="mt-0.5 hidden text-sm text-stone-500 dark:text-stone-400 sm:block">
           {mode === "parallel"
             ? "给常用流程预设角色，加入工作区后多个角色可以同页并行各自处理图片，互不影响。"
-            : "把多个角色串成流水线：上一步的产物自动喂给下一步，每一步都可以单独重做、替换输入、调附加说明。"}
+            : mode === "pipeline"
+              ? "把多个角色串成流水线：上一步的产物自动喂给下一步，每一步都可以单独重做、替换输入、调附加说明。"
+              : "一次性扔多张原图各自跑一套流水线，跑完后可统一对接后处理角色（如统一调色）打包下载。"}
         </p>
       </header>
 
@@ -373,6 +582,7 @@ function AgentsWorkbench() {
             items={[
               { key: "parallel", label: "并行模式", children: parallelTabContent },
               { key: "pipeline", label: "流水线模式", children: <PipelineMode agents={agents} /> },
+              { key: "batch", label: "批量任务", children: batchTabContent },
             ]}
           />
         </section>
@@ -410,6 +620,27 @@ function AgentsWorkbench() {
         page={recordsPage}
         onPageChange={setRecordsPage}
         refreshKey={recordsRefreshKey}
+      />
+
+      {/* 批量任务 3 个 Modal */}
+      <BatchCreateModal
+        open={batchCreateOpen}
+        onClose={() => setBatchCreateOpen(false)}
+        onCreated={handleBatchCreated}
+        agents={agents}
+        pipelines={pipelinesForBatch}
+      />
+      <BatchTemplateManagerModal
+        open={batchTemplateManagerOpen}
+        onClose={() => setBatchTemplateManagerOpen(false)}
+        agents={agents}
+        pipelines={pipelinesForBatch}
+      />
+      <BatchFromTemplateModal
+        open={batchFromTemplateOpen}
+        onClose={() => setBatchFromTemplateOpen(false)}
+        onCreated={handleBatchCreated}
+        templates={batchTemplates}
       />
     </main>
   );

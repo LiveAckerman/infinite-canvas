@@ -79,6 +79,28 @@ func New() *gin.Engine {
 	me.GET("/pipeline-runs/me/:id/zip", func(c *gin.Context) {
 		handler.DownloadMyPipelineRunZip(c.Writer, c.Request, c.Param("id"))
 	})
+	me.GET("/pipeline-batches/me", gin.WrapF(handler.MyPipelineBatches))
+	me.POST("/pipeline-batches/me", gin.WrapF(handler.CreateMyPipelineBatch))
+	me.GET("/pipeline-batches/me/:id", func(c *gin.Context) {
+		handler.GetMyPipelineBatch(c.Writer, c.Request, c.Param("id"))
+	})
+	me.DELETE("/pipeline-batches/me/:id", func(c *gin.Context) {
+		handler.DeleteMyPipelineBatch(c.Writer, c.Request, c.Param("id"))
+	})
+	me.POST("/pipeline-batches/me/:id/decide-post", func(c *gin.Context) {
+		handler.DecideMyPipelineBatchPost(c.Writer, c.Request, c.Param("id"))
+	})
+	me.POST("/pipeline-batches/me/:id/recheck-post", func(c *gin.Context) {
+		handler.RecheckMyPipelineBatchPost(c.Writer, c.Request, c.Param("id"))
+	})
+	me.GET("/pipeline-batches/me/:id/zip", func(c *gin.Context) {
+		handler.DownloadMyPipelineBatchZip(c.Writer, c.Request, c.Param("id"))
+	})
+	me.GET("/pipeline-batch-templates/me", gin.WrapF(handler.MyPipelineBatchTemplates))
+	me.POST("/pipeline-batch-templates/me", gin.WrapF(handler.SaveMyPipelineBatchTemplate))
+	me.DELETE("/pipeline-batch-templates/me/:id", func(c *gin.Context) {
+		handler.DeleteMyPipelineBatchTemplate(c.Writer, c.Request, c.Param("id"))
+	})
 	me.POST("/prompts/improve", gin.WrapF(handler.ImprovePrompt))
 	me.POST("/prompts/submit", gin.WrapF(handler.SubmitPrompt))
 	me.POST("/images", gin.WrapF(handler.UploadImage))

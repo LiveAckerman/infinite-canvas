@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,6 +134,13 @@ func SaveMyPipelineRun(userID string, item model.PipelineRun) (model.PipelineRun
 	item.PipelineID = saved.PipelineID
 	item.CreatedAt = saved.CreatedAt
 	item.UpdatedAt = time.Now().Format(time.RFC3339)
+	// 批量任务相关字段以创建时落库的为准，不允许客户端篡改。
+	item.BatchID = saved.BatchID
+	item.Kind = saved.Kind
+	item.Position = saved.Position
+	if len(item.SourceRefs) == 0 {
+		item.SourceRefs = saved.SourceRefs
+	}
 	// PipelineNameSnap / SeedKey 允许更新（用户在详情页可能替换 seed）
 	if strings.TrimSpace(item.PipelineNameSnap) == "" {
 		item.PipelineNameSnap = saved.PipelineNameSnap
@@ -140,7 +148,17 @@ func SaveMyPipelineRun(userID string, item model.PipelineRun) (model.PipelineRun
 	if strings.TrimSpace(item.SeedKey) == "" {
 		item.SeedKey = saved.SeedKey
 	}
-	return repository.SavePipelineRun(item)
+	persisted, err := repository.SavePipelineRun(item)
+	if err != nil {
+		return persisted, err
+	}
+	// 属于某个 batch → 推进 batch 状态机（失败不致命，log 即可）
+	if persisted.BatchID != "" {
+		if err := UpdateBatchStatusAfterRunChange(persisted.BatchID); err != nil {
+			log.Printf("update batch status after run change failed: %v", err)
+		}
+	}
+	return persisted, nil
 }
 
 // DeleteMyPipelineRun 删除当前用户的执行流程；级联清理 seed + 每步产物图片

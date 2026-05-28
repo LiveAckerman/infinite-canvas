@@ -1,8 +1,8 @@
 "use client";
 
-import { Image as ImageIcon, Plus, Trash2, Upload } from "lucide-react";
+import { ClipboardPaste, Image as ImageIcon, Plus, Trash2, Upload } from "lucide-react";
 import { App, AutoComplete, Button, Form, Image, Input, Modal, Select } from "antd";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent } from "react";
 
 import { useImageUploader } from "@/lib/use-image-uploader";
 import { imageUrl } from "@/services/image-storage";
@@ -45,6 +45,8 @@ export function AgentEditModal({ open, editing, onClose, onSubmit, submitting }:
   // 这样既避免渲染多份 input 露出原生「选择文件 未选择…」UI，也省得每个槽位重写一遍 ref。
   const refFileInputRef = useRef<HTMLInputElement>(null);
   const refSlotIndexRef = useRef<number>(-1);
+  // 拖拽 / 粘贴时给参考图区域加蓝色高亮；离开 / 松手清掉。
+  const [refDragHighlight, setRefDragHighlight] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -106,6 +108,91 @@ export function AgentEditModal({ open, editing, onClose, onSubmit, submitting }:
   const removeReference = (index: number) => {
     const current: string[] = form.getFieldValue("referenceImageKeys") || [];
     form.setFieldValue("referenceImageKeys", current.filter((_, idx) => idx !== index));
+  };
+
+  // 批量追加：拖入 / 粘贴可能同时给多张图，按顺序填到剩余槽位（超过最大数的丢弃 + toast 提示）。
+  // 单张失败只跳过那一张，跟 /image 工作台的 addReferencesFromBlobs 一致。
+  const appendReferenceFiles = async (files: File[]) => {
+    const images = files.filter((file) => file.type.startsWith("image/"));
+    if (!images.length) {
+      if (files.length) message.error("不是图片，已忽略");
+      return;
+    }
+    const current: string[] = form.getFieldValue("referenceImageKeys") || [];
+    const remain = Math.max(0, MAX_REFERENCE_IMAGES - current.length);
+    if (remain <= 0) {
+      message.error(`参考图最多 ${MAX_REFERENCE_IMAGES} 张`);
+      return;
+    }
+    if (images.length > remain) {
+      message.warning(`只追加 ${remain} 张，剩余 ${images.length - remain} 张超过上限被丢弃`);
+    }
+    const toUpload = images.slice(0, remain);
+    const uploaded = await Promise.all(toUpload.map(async (file) => {
+      try {
+        const result = await uploadWithToast(file, { label: "参考图" });
+        return result.storageKey;
+      } catch {
+        return null;
+      }
+    }));
+    const additions = uploaded.filter((key): key is string => Boolean(key));
+    if (additions.length) {
+      form.setFieldValue("referenceImageKeys", [...current, ...additions].slice(0, MAX_REFERENCE_IMAGES));
+    }
+  };
+
+  // 拖入：只有 dataTransfer.types 含 "Files" 才高亮，避免文本拖动也变蓝。
+  const handleRefDragOver = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setRefDragHighlight(true);
+  };
+  const handleRefDragLeave = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setRefDragHighlight(false);
+  };
+  const handleRefDrop = (event: ReactDragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setRefDragHighlight(false);
+    const files = Array.from(event.dataTransfer.files || []);
+    void appendReferenceFiles(files);
+  };
+
+  // 在参考图区域里 Ctrl/Cmd+V 粘贴：拦截 clipboardData.items 里的图片项，
+  // 不阻止其它内容的默认粘贴行为，只在出现图片时 preventDefault。
+  const handleRefPaste = (event: ReactClipboardEvent<HTMLDivElement>) => {
+    const items = Array.from(event.clipboardData?.items || []);
+    const files = items
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (!files.length) return;
+    event.preventDefault();
+    void appendReferenceFiles(files);
+  };
+
+  // 「读取剪切板」按钮：用 Clipboard API（要 HTTPS / localhost），跟 /image 工作台一致。
+  const handleRefClipboardButton = async () => {
+    try {
+      const items = await navigator.clipboard.read();
+      const blobs: File[] = [];
+      for (const item of items) {
+        for (const type of item.types) {
+          if (!type.startsWith("image/")) continue;
+          const blob = await item.getType(type);
+          blobs.push(new File([blob], `clipboard-${Date.now()}-${blobs.length}.png`, { type }));
+        }
+      }
+      if (!blobs.length) {
+        message.error("剪切板里没有可读取的图片");
+        return;
+      }
+      await appendReferenceFiles(blobs);
+    } catch {
+      message.error("剪切板里没有可读取的图片");
+    }
   };
 
   const submit = async () => {
@@ -177,10 +264,30 @@ export function AgentEditModal({ open, editing, onClose, onSubmit, submitting }:
           disabled={submitting}
         />
         <Form.Item
-          label={`参考图（可选，最多 ${MAX_REFERENCE_IMAGES} 张）`}
-          extra="不传也可以；如果加了，每次该角色生图都会和你在工作台上传的图一起作为参考。常用于「按这种风格 / 构图来」类的角色。"
+          label={(
+            <div className="flex w-full items-center justify-between gap-3">
+              <span>参考图（可选，最多 {MAX_REFERENCE_IMAGES} 张）</span>
+              <Button
+                size="small"
+                icon={<ClipboardPaste className="size-3.5" />}
+                onClick={() => void handleRefClipboardButton()}
+                disabled={watchedReferenceKeys.length >= MAX_REFERENCE_IMAGES}
+              >
+                读取剪切板
+              </Button>
+            </div>
+          )}
+          extra="不传也可以；如果加了，每次该角色生图都会和你在工作台上传的图一起作为参考。常用于「按这种风格 / 构图来」类的角色。支持拖入 / 粘贴 / 剪切板 / 点击四种方式，可一次加多张。"
         >
-          <div className="flex flex-wrap items-start gap-3">
+          {/* 整个参考图区域包一层 drop / paste 容器：拖入 / Ctrl-V 都能批量追加 */}
+          <div
+            tabIndex={0}
+            onPaste={handleRefPaste}
+            onDragOver={handleRefDragOver}
+            onDragLeave={handleRefDragLeave}
+            onDrop={handleRefDrop}
+            className={`relative flex flex-wrap items-start gap-3 rounded-md p-2 transition-colors ${refDragHighlight ? "bg-blue-50/60 outline outline-2 outline-blue-400 dark:bg-blue-500/10 dark:outline-blue-500" : ""}`}
+          >
             {watchedReferenceKeys.map((key, index) => (
               <div key={`${index}-${key}`} className="group relative size-[104px] overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
                 <Image
@@ -212,7 +319,12 @@ export function AgentEditModal({ open, editing, onClose, onSubmit, submitting }:
             {watchedReferenceKeys.length === 0 ? (
               <div className="flex h-[104px] items-center text-xs text-stone-500 dark:text-stone-400">
                 <ImageIcon className="mr-1 size-3.5" />
-                <span>没有参考图也能生成，调用时只走你在工作台上传的图</span>
+                <span>{refDragHighlight ? "松开以添加参考图" : "没有参考图也能生成，调用时只走你在工作台上传的图"}</span>
+              </div>
+            ) : null}
+            {refDragHighlight && watchedReferenceKeys.length > 0 ? (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-md bg-blue-500/5 text-sm font-medium text-blue-600 dark:text-blue-300">
+                松开以添加参考图
               </div>
             ) : null}
           </div>
