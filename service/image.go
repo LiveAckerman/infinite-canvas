@@ -16,6 +16,9 @@ import (
 const maxImageBytes = 32 << 20
 
 // SaveImage 把图片字节写入磁盘 IMAGE_DIR/{userId}/{id}.{ext}，DB 记录 path。
+//
+// 对普通用户做 500MB 配额检查（admin 跳过）。配额超出时拒绝，让用户先去
+// 「管理后台 / 我的素材」清理后再上传，而不是无声占用磁盘。
 func SaveImage(userID string, data []byte, mimeType string) (model.Image, error) {
 	if userID == "" {
 		return model.Image{}, errors.New("请先登录")
@@ -25,6 +28,13 @@ func SaveImage(userID string, data []byte, mimeType string) (model.Image, error)
 	}
 	if len(data) > maxImageBytes {
 		return model.Image{}, errors.New("图片超过 32MB")
+	}
+	// per-user 配额：只对普通用户生效，admin 默认无限。
+	if user, ok, _ := repository.GetUserByID(userID); ok && user.Role != model.UserRoleAdmin {
+		total, err := userImageTotalBytes(userID)
+		if err == nil && total+int64(len(data)) > UserImageQuotaBytes {
+			return model.Image{}, errImageQuotaExceeded
+		}
 	}
 	if mimeType == "" {
 		mimeType = "image/png"
@@ -104,7 +114,13 @@ func DeleteImage(userID string, id string) error {
 	if image.UserID != userID {
 		return errors.New("权限不足")
 	}
-	if err := repository.DeleteImage(id); err != nil {
+	return deleteImageInternal(image)
+}
+
+// deleteImageInternal 不做 owner 校验的删除（供 admin 孤儿清理、级联删除等使用）。
+// 同步删 DB 行 + 磁盘文件，文件不存在不报错。
+func deleteImageInternal(image model.Image) error {
+	if err := repository.DeleteImage(image.ID); err != nil {
 		return err
 	}
 	if image.Path != "" {

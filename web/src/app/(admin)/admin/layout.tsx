@@ -1,6 +1,6 @@
 "use client";
 
-import { ApiOutlined, DollarOutlined, FileTextOutlined, HomeOutlined, LogoutOutlined, PictureOutlined, ScheduleOutlined, TeamOutlined } from "@ant-design/icons";
+import { ApiOutlined, DatabaseOutlined, DollarOutlined, FileTextOutlined, HomeOutlined, LogoutOutlined, PictureOutlined, ScheduleOutlined, TeamOutlined } from "@ant-design/icons";
 import { Button, Flex, Layout, Menu, Typography } from "antd";
 import { LogOut } from "lucide-react";
 import Link from "next/link";
@@ -28,6 +28,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
     { key: "/admin/credit-logs", icon: <DollarOutlined />, label: <Link href="/admin/credit-logs" style={{ color: "inherit" }}>积分流水</Link>, title: "积分流水" },
     { key: "/admin/prompts", icon: <FileTextOutlined />, label: <Link href="/admin/prompts" style={{ color: "inherit" }}>提示词管理</Link>, title: "提示词管理" },
     { key: "/admin/assets", icon: <PictureOutlined />, label: <Link href="/admin/assets" style={{ color: "inherit" }}>素材库</Link>, title: "素材库管理" },
+    { key: "/admin/storage", icon: <DatabaseOutlined />, label: <Link href="/admin/storage" style={{ color: "inherit" }}>存储管理</Link>, title: "存储管理" },
   ];
   const activeMenu = adminMenuItems.find((item) => pathname.startsWith(item.key));
   const activeKey = activeMenu?.key || "";

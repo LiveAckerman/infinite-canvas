@@ -22,6 +22,61 @@ export const RUNS_QUERY_KEY = ["my-pipeline-runs"] as const;
 // 前面的跑完才会被 pickQueued 选中。设 3 是为了不让单 tab 一次性把上游打挂。
 const CONCURRENCY_CAP = 3;
 
+// 孤儿 run 的 updatedAt 阈值：超过这个时长没有任何 step PUT 更新，
+// 即便不是本 tab 的 ownership 也接管恢复（防止跨 tab crash / 跨设备遗留死锁）。
+// 单步生图 30s~2min，5 分钟没动静基本就是孤儿了。
+const ORPHAN_THRESHOLD_MS = 5 * 60 * 1000;
+
+// 本 tab 跑 run 的 sessionStorage 标记前缀。sessionStorage 跨刷新保留、跨 tab 隔离、
+// tab 关闭/crash 清空 —— 正好符合「我刷新后接管自己之前在跑的」语义。
+const OWNERSHIP_STORAGE_PREFIX = "infinite-canvas:pipeline-run-ownership:";
+function ownershipKey(runId: string) {
+  return `${OWNERSHIP_STORAGE_PREFIX}${runId}`;
+}
+function markRunOwned(runId: string) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(ownershipKey(runId), String(Date.now()));
+  } catch {
+    // sessionStorage 满 / 隐身模式禁用都不致命，单独失败不影响主流程
+  }
+}
+function unmarkRunOwned(runId: string) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(ownershipKey(runId));
+  } catch {
+    // ignore
+  }
+}
+function isOwnedByThisTab(runId: string) {
+  if (typeof window === "undefined") return false;
+  try {
+    return Boolean(window.sessionStorage.getItem(ownershipKey(runId)));
+  } catch {
+    return false;
+  }
+}
+
+// 把一条 status="running"（但本 tab 没在跑、调度器拿不到任何 inflight）的孤儿 run
+// 「软重置」回 queued：所有 step.status === "running" 的步骤改成 idle，让 runner 能从头跑那一步，
+// 已经 success 的不动（runner 自动跳过）。
+function recoverStaleRun(run: PipelineRun): PipelineRun {
+  return {
+    ...run,
+    status: "queued",
+    steps: run.steps.map((step) => {
+      if (step.status !== "running") return step;
+      return {
+        ...step,
+        status: "idle",
+        errorMessage: undefined,
+        durationMs: undefined,
+      };
+    }),
+  };
+}
+
 type Props = {
   // 当前用户角色库，用来调上游时找 agent.systemPrompt / referenceImageKeys / defaultSize 等
   agents: Agent[];
@@ -81,7 +136,34 @@ export function usePipelineRunManager({ agents }: Props) {
         inflightIdsRef.current.delete(id);
       }
     }
-    // 看 queued / running（running 但不在 inflight 的可能是别 tab 启的；本 tab 不接管）
+
+    // ⚠️ 孤儿 run 恢复：status === "running" 但本 tab 没在跑 →
+    //   - 本 tab 之前 own 过它（sessionStorage 有标记）→ 用户刷新后回来，必接管恢复；
+    //   - 没 own 但 updatedAt 老于 5 分钟 → 兜底救活（防别 tab crash 留下死锁）。
+    //   - 其余情况认为是别 tab 在正常跑，不动。
+    const now = Date.now();
+    for (const run of items) {
+      if (run.status !== "running") continue;
+      if (inflightIdsRef.current.has(run.id)) continue;
+      const owned = isOwnedByThisTab(run.id);
+      const updatedAt = run.updatedAt ? new Date(run.updatedAt).getTime() : 0;
+      const stale = updatedAt > 0 && now - updatedAt > ORPHAN_THRESHOLD_MS;
+      if (!owned && !stale) continue;
+      // 重置 step.status="running" 为 idle，runner 拉起来后从这些 idle 步骤继续跑。
+      const recovered = recoverStaleRun(run);
+      // 同步本地 cache 让 UI 立刻反应（pill 从「运行中」变「排队中」），avoid 闪烁
+      queryClient.setQueryData<PipelineRunListResponse>(RUNS_QUERY_KEY, (old) => {
+        if (!old) return old;
+        return { ...old, items: old.items.map((item) => (item.id === run.id ? recovered : item)) };
+      });
+      inflightIdsRef.current.add(run.id);
+      // 把恢复结果 PUT 回服务器，然后 runRun 自己会接着把 status 改回 running
+      void saveMyPipelineRun(token, recovered).catch(() => {
+        // PUT 失败不致命：runRun 内部第一步还会再 persist running 一次
+      }).finally(() => runRun(run.id));
+    }
+
+    // 然后挑可启动的 queued run
     for (const run of items) {
       if (run.status !== "queued") continue;
       if (inflightIdsRef.current.size >= CONCURRENCY_CAP) break;
@@ -94,11 +176,15 @@ export function usePipelineRunManager({ agents }: Props) {
 
   // 主执行循环：拉最新 run → for 每个 idle / failed step → 调上游 → PUT 写回后端
   const runRun = async (runId: string) => {
+    // 标记 sessionStorage：本 tab 在跑这条 run。
+    // 用户刷新页面后 scheduleFromCache 会读到这个标记，把孤儿 run 接管恢复。
+    markRunOwned(runId);
     try {
       // 第一次：把 status 标为 running 推回后端
       const initial = (queryClient.getQueryData<PipelineRunListResponse>(RUNS_QUERY_KEY)?.items || []).find((item) => item.id === runId);
       if (!initial) {
         inflightIdsRef.current.delete(runId);
+        unmarkRunOwned(runId);
         return;
       }
       const startedRun: PipelineRun = { ...initial, status: "running" };
@@ -199,6 +285,9 @@ export function usePipelineRunManager({ agents }: Props) {
       }
     } finally {
       inflightIdsRef.current.delete(runId);
+      // 释放 ownership 标记：跑到终态了，下次刷新不再需要恢复这条 run。
+      // 中途 cancel / 抛错走 finally 也都释放，避免标记常驻 sessionStorage。
+      unmarkRunOwned(runId);
       notifySubscribers();
       // 触发一次调度，看有没有 queued 等着上
       scheduleFromCache();

@@ -43,6 +43,9 @@ export type GenerationQuery = {
   agentId?: string;
   // "1" → 只看「来自角色工作台」的记录（agent_id 非空）；与 agentId 同时存在时 agentId 生效
   hasAgent?: string;
+  // "1" → 排除「来自角色工作台」的记录（agent_id 为空 / null）；/image 工作台左侧列表用。
+  // 优先级：agentId > hasAgent > excludeAgent，同时存在时按这个顺序应用。
+  excludeAgent?: string;
 };
 
 export type SaveGenerationPayload = {

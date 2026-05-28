@@ -53,7 +53,18 @@ func SaveGeneration(userID string, item model.Generation) (model.Generation, err
 }
 
 func DeleteGeneration(userID string, id string) error {
-	return repository.DeleteGeneration(userID, id)
+	// 删除前先把这条 generation 引用的所有 storageKey 攒出来，
+	// 删完再调 CleanupImagesByKeysIfOrphan 一次性清理已无引用的图片。
+	saved, ok, _ := repository.GetGenerationByID(id)
+	if err := repository.DeleteGeneration(userID, id); err != nil {
+		return err
+	}
+	if ok && saved.UserID == userID {
+		keys := append([]string{}, saved.Thumbnails...)
+		keys = append(keys, saved.References...)
+		CleanupImagesByKeysIfOrphan(userID, keys)
+	}
+	return nil
 }
 
 // ListAllGenerationsForAdmin 管理后台用，给每条记录附上 username。

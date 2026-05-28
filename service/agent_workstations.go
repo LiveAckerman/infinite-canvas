@@ -93,6 +93,7 @@ func SaveMyAgentWorkstationCard(userID string, item model.AgentWorkstationCard) 
 }
 
 // DeleteMyAgentWorkstationCard 按 ID 删除当前用户的卡片（「移出工作区」时调用）。
+// 级联清理 reference / output 图片（如果别处没在引用）。
 func DeleteMyAgentWorkstationCard(userID string, id string) error {
 	if userID == "" {
 		return errors.New("请先登录")
@@ -104,5 +105,16 @@ func DeleteMyAgentWorkstationCard(userID string, id string) error {
 	if !ok || saved.UserID != userID {
 		return errors.New("卡片不存在")
 	}
-	return repository.DeleteAgentWorkstationCard(id)
+	if err := repository.DeleteAgentWorkstationCard(id); err != nil {
+		return err
+	}
+	keys := make([]string, 0, 2)
+	if saved.ReferenceKey != "" {
+		keys = append(keys, saved.ReferenceKey)
+	}
+	if saved.OutputKey != "" {
+		keys = append(keys, saved.OutputKey)
+	}
+	CleanupImagesByKeysIfOrphan(userID, keys)
+	return nil
 }

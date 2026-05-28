@@ -143,14 +143,37 @@ func SaveMyPipelineRun(userID string, item model.PipelineRun) (model.PipelineRun
 	return repository.SavePipelineRun(item)
 }
 
-// DeleteMyPipelineRun 删除当前用户的执行流程。
-// 不级联删图片（产物图在素材库可能还在用）。
+// DeleteMyPipelineRun 删除当前用户的执行流程；级联清理 seed + 每步产物图片
+// （如果别处没在引用，比如用户已经把产物存到素材库就保留）。
 func DeleteMyPipelineRun(userID string, id string) error {
 	saved, err := GetMyPipelineRun(userID, id)
 	if err != nil {
 		return err
 	}
-	return repository.DeletePipelineRun(saved.ID)
+	if err := repository.DeletePipelineRun(saved.ID); err != nil {
+		return err
+	}
+	keySet := map[string]bool{}
+	if saved.SeedKey != "" {
+		keySet[saved.SeedKey] = true
+	}
+	for _, step := range saved.Steps {
+		if step.ManualOverrideKey != "" {
+			keySet[step.ManualOverrideKey] = true
+		}
+		if step.OutputKey != "" {
+			keySet[step.OutputKey] = true
+		}
+		if step.LastRunSnapshot != nil && step.LastRunSnapshot.InputKey != "" {
+			keySet[step.LastRunSnapshot.InputKey] = true
+		}
+	}
+	keys := make([]string, 0, len(keySet))
+	for k := range keySet {
+		keys = append(keys, k)
+	}
+	CleanupImagesByKeysIfOrphan(userID, keys)
+	return nil
 }
 
 // StreamPipelineRunZip 把 run 里 seed + 每步产物按文件名规范打包成 zip，写到 w。

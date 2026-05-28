@@ -128,8 +128,11 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
   };
 
   const logsQuery = useQuery({
-    queryKey: ["my-generations", token],
-    queryFn: () => fetchGenerations(token, { page: 1, pageSize: 100 }),
+    // queryKey 带 "exclude-agent" 标记跟 /agents Drawer 的同名 query 区分缓存，
+    // 避免某一边的 react-query setQueryData 误入侵另一边。
+    queryKey: ["my-generations", "exclude-agent", token],
+    // /image 左侧只展示「非角色工作台」发起的记录；agent 工作台的图走 /agents 的 Drawer。
+    queryFn: () => fetchGenerations(token, { page: 1, pageSize: 100, excludeAgent: "1" }),
     enabled: Boolean(token),
     retry: false,
   });
@@ -145,7 +148,9 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
     onSuccess: (saved) => {
       // 立刻把新记录推到 react-query 缓存最前，避免随后 router.replace 到 /image/{id}
       // 后，新挂载的页面读到旧缓存找不到这条记录而误报"记录不存在"。
-      queryClient.setQueryData<GenerationListResponse>(["my-generations", token], (old) => {
+      // 用新的 queryKey（带 exclude-agent 标记）跟 fetchGenerations 的 query 对齐，
+      // 否则乐观写入会落到旧 key 不再被订阅的缓存里、UI 看不到。
+      queryClient.setQueryData<GenerationListResponse>(["my-generations", "exclude-agent", token], (old) => {
         if (!old) return { items: [saved], total: 1 };
         const exists = old.items.some((item) => item.id === saved.id);
         if (exists) return { ...old, items: old.items.map((item) => (item.id === saved.id ? saved : item)) };

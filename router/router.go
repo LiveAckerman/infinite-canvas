@@ -124,6 +124,8 @@ func New() *gin.Engine {
 	})
 	admin.GET("/generations", gin.WrapF(handler.AdminGenerations))
 	admin.GET("/credit-logs", gin.WrapF(handler.AdminCreditLogs))
+	admin.GET("/storage/orphans", gin.WrapF(handler.AdminStorageOrphans))
+	admin.POST("/storage/cleanup", gin.WrapF(handler.AdminStorageCleanup))
 
 	router.NoRoute(middleware.NotFoundJSON)
 

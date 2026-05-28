@@ -330,3 +330,16 @@
   - **额度 0 拦截**：用户余额 0，curl POST `/api/v1/images/generations` → 应直接返回「额度不足，请联系管理员」，**不调上游、不写流水**。
   - **admin 不参与**：admin 用户怎么点都不动 credits 字段，不写流水。
   - **退回的原子性**：在 db 上手动把某用户 credits 改 0，curl 并发 5 个 n=3 请求 → 最多只有 0 个能预扣到（5 个都拒绝）；改 9，5 个并发 n=3 → 最多 3 个能预扣到（一个用 3 张 = 9÷3），其余拒绝；不会出现「先扣 12 再说」的情况。
+- `/image` 和 `/agents` 生图记录隔离：
+  - 先在 `/agents` 并行模式跑出 3 张图（每张走 agent 流程，会写一条带 `agentId` 的 generation 记录）。
+  - 再进 `/image`，左侧记录列表**只应**看到从 `/image` 工作台 / 画布发起的记录，**不应**出现刚才在 `/agents` 跑的 3 条。
+  - 反过来：在 `/image` 跑出 2 张图（写带 `agentId=""` 的 generation 记录），点 `/agents` 工作区的「生成记录」按钮打开 Drawer，**只应**看到角色工作台的记录，**不应**出现 `/image` 那 2 条。
+  - DevTools Network 看 `/image` 发的 `/api/generations` 请求 query string 应带 `excludeAgent=1`；`/agents` Drawer 发的请求带 `hasAgent=1`。
+  - 越权防护不变：用账号 A token 调 `/api/generations?excludeAgent=1` 拿到的是 A 名下的非 agent 记录，不会泄漏 B 的。
+- 流水线刷新后自动恢复：
+  - 在 `/agents` 流水线模式跑一条 3 步流水线，等第 1 或第 2 步进入「运行中」状态时**刷新页面**。
+  - 页面重新加载后，应该在 1-2 秒内（cache 拉回 + scheduler 扫到）自动接管这条 run：pill 短暂闪一下「排队中」然后变回「运行中 N/M」，继续跑接下来的步骤。**不会再无限卡在 loading**。
+  - DevTools Application → Session Storage 应看到 `infinite-canvas:pipeline-run-ownership:{runId}` 标记；跑完后自动清掉。
+  - 多 tab 不互踩：Tab A 跑一条 run（updatedAt 持续刷新），Tab B 同账号打开 `/agents` 看到这条 run 是「运行中」**不会接管**（因为 Tab B 的 sessionStorage 没标记 + Tab A 持续更新 updatedAt < 5min）。Tab A 跑完后 Tab B 仍能看到结果。
+  - 跨设备孤儿兜底：A 设备跑了一条 run 然后断电（极端），B 设备打开 `/agents` 5+ 分钟后会自动接管。短于 5 分钟内不接管（因为有可能 A 还活着）。
+  - 全程不需要手动点「重试 / 续跑」按钮 — 用户的 mental model 就是「刷新后流水线继续跑」。

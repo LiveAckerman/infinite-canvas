@@ -33,11 +33,16 @@ func ListGenerations(userID string, q model.Query) ([]model.Generation, int64, e
 	q.Normalize()
 	tx := db.Model(&model.Generation{}).Where("user_id = ?", userID)
 	if q.AgentID != "" {
-		// 指定 agent：精确匹配，覆盖 HasAgent
+		// 指定 agent：精确匹配，优先级最高
 		tx = tx.Where("agent_id = ?", q.AgentID)
 	} else if q.HasAgent {
 		// 仅看角色工作台的记录（agent_id 非空 / 非 null）
 		tx = tx.Where("agent_id IS NOT NULL AND agent_id <> ?", "")
+	} else if q.ExcludeAgent {
+		// 排除角色工作台的记录，留下 /image 和画布的（agent_id 为空 / null）。
+		// SQLite 历史数据可能 agent_id 字段缺失（NULL），sqlite 不支持 IS NULL 和 = '' 一次写完，
+		// 用 OR 显式覆盖两种情况。
+		tx = tx.Where("agent_id IS NULL OR agent_id = ?", "")
 	}
 
 	var total int64

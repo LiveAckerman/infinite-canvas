@@ -2,9 +2,28 @@
 
 ## Unreleased
 
+## v0.0.25 - 2026-05-28
+
++ [新增] **图片存储治理：孤儿清理 + 级联删除 + 用户配额**：之前图片只增不减——画布节点删了、生成记录删了、素材删了，对应磁盘文件全留着；服务器 `data/uploads` 累积到 772MB / 393 张。本次三层治理一并落地：
+  - **后端 `service/image_cleanup.go`（新）**：核心是 `CollectInUseImageKeys()`，一次扫描 generations.thumbnails/references、canvases.data（递归 JSON 树）、assets.cover_url/url、prompts.cover_url、agents.avatar_url/reference_image_keys、agent_workstation_cards.reference_key/output_key、pipeline_runs.seed_key/steps[].output_key/manual_override_key/last_run_snapshot.input_key —— 拼出全库 in-use storageKey 集合。`FindOrphanImages()` 返回 in-use 集合外的图片（孤儿）+ 全库统计 + 按用户聚合的占用排名；`CleanupOrphanImages()` 实际执行删除。
+  - **级联删除（P1）**：`DeleteGeneration` / `DeleteCanvas` / `DeleteMyAsset` / `DeleteMyAgent` / `DeleteMyAgentWorkstationCard` / `DeleteMyPipelineRun` 删完主表记录后，把这条记录引用过的所有 storageKey 攒成数组，调 `CleanupImagesByKeysIfOrphan(userID, keys)`：扫一遍 in-use 集合，对其中已无引用的图片走 owner 校验后物理删除。被别处仍引用的图（比如同一张图加进了多个画布）会保留。
+  - **per-user 配额（P2 lite）**：`SaveImage` 上传前查询 `SUM(size) WHERE user_id=?`，超过 **500MB** 拒绝（admin 无限）。错误文案中文友好：「您的图片存储已达上限（500MB），请清理后再上传」。
+  - **管理后台「存储管理」页 `/admin/storage`**：仪表盘展示全库图片数 / 总占用 / 孤儿数 / 孤儿占比；表格列出每张孤儿（owner、类型、大小、创建时间）；按用户聚合的占用排名表；红色「清理全部孤儿」按钮带二次确认弹窗。新增接口 `GET /api/admin/storage/orphans` + `POST /api/admin/storage/cleanup`，仅管理员可调。
+
 ## v0.0.24 - 2026-05-28
 
 + [修复] **生图额度并发扣减 race，余额为 0 仍能继续扣**：用户多 tab / 多次连点「开始生成」时，会观察到 `/admin/credit-logs` 出现「-1 → 余额 0」的多条连续记录 —— 看起来扣到 0 还能继续扣。**真正根因**：① `handler/ai_proxy.go` 调 `service.ConsumeCredits` 时把第二个返回值（`ok bool`）用 `_` 丢了，余额不足时 `RowsAffected=0` 返回 `(0, false, nil)`，handler 仍把这个失败当成功走了 `logImageConsume` 写流水 + 把图返给用户；② pre-check `user.Credits <= 0` 用的是请求开始时从 DB 读的快照，多个并发请求同时进来都看到正余额都过 pre-check，下游也都成功生图返回，只有第一个 `ConsumeCredits` 能扣到，其余扣减失败但流水照样记录 —— 形成「1 块钱白嫖 N 次」漏洞。**修法**：handler 改成「reserve-then-confirm」模式 —— 请求开始时按 payload.n（edits 兜底按 1）原子预扣，上游失败 / 数量为 0 全额 `service.RefundCredits` 退回；上游返回 N 小于预扣数退回差额，N 大于预扣数（极少见）补扣；补扣失败时只按 reserved 张数计费、多生的几张算白送不强制扔图。新增 `service.RefundCredits` + `repository.RefundUserCredits`（原子 `credits + ?`）。从根本上让 DB 层的 `WHERE credits >= ?` 原子条件成为唯一防线，pre-check 不再被并发绕过。
+
++ [修复] **流水线 run 跑到一半刷新页面会无限卡在 loading**：客户端调度器 `usePipelineRunManager.scheduleFromCache` 之前只接管 `status === "queued"` 的 run，看到 `running` 状态默认是「别 tab 在跑」直接跳过。但用户刷新页面时，原来的 tab 已经死了，没有任何 tab 在接管 → run 永远卡死。修复加了两层兜底：
+  - **本 tab ownership 标记（sessionStorage）**：runner 启动一条 run 时往 sessionStorage 写入 `infinite-canvas:pipeline-run-ownership:{runId}` 标记，跑到终态时清掉。sessionStorage 的特性是「跨刷新保留、跨 tab 隔离、tab 关闭/crash 清空」，正好符合「我刷新后接管自己之前在跑的」语义。
+  - **5 分钟孤儿超时兜底**：scheduleFromCache 扫描 cache 时，对 `status === "running"` 且本 tab 不在 inflight 的 run，检查：① 本 tab 之前 own 过 → 接管恢复；② 没 own 但 `updatedAt > 5min` → 也接管（防止别 tab crash 留下死锁、跨设备遗留等）。其余视为「别 tab 在正常跑」，仍按原逻辑跳过避免双重执行。
+  - **恢复动作**：`recoverStaleRun()` 把 `step.status === "running"` 的步骤重置为 `idle`（runner 看到 idle 会继续跑那一步；已 success 的步骤不动自动跳过）。run.status 改 `queued`、立即乐观更新 cache 让 UI pill 从「运行中」变「排队中」、PUT 写回后端、加入 inflight、调 `runRun` 接管。
+  - 多 tab 共用同账号的场景：sessionStorage 是 per-tab 的，Tab B 看不到 Tab A 的 ownership 标记，所以 Tab B 不会接管 Tab A 还在正常跑的 run（updatedAt 仍在 5min 内）。只有真孤儿才会被 Tab B 救活。
+
++ [修复] **`/image` 生图工作台左侧记录列表混进了 `/agents` 角色工作台的图**：之前 `fetchGenerations(token, { page: 1, pageSize: 100 })` 没传任何过滤参数，返回的是用户名下所有 generation（包括 `/agents` 工作台保存的、带 `agentId` 的那些）。`/agents` Drawer 之前已经用 `hasAgent=1` 筛过自己一半；但 `/image` 这边一直缺一个反向的「排除角色工作台」筛选。修复：
+  - 后端 `model.Query` 加 `ExcludeAgent bool` 字段，`parseQuery` 接受 `excludeAgent=1 / true`，`repository.ListGenerations` 在 `ExcludeAgent` 为 true 时加 `WHERE agent_id IS NULL OR agent_id = ''` 子句（SQLite 历史数据里这列可能两种空状态都有）。优先级 `AgentID > HasAgent > ExcludeAgent`。
+  - 前端 `GenerationQuery` 类型加 `excludeAgent?: string`；`image-workspace.tsx` 的 `logsQuery` 传 `{ excludeAgent: "1" }`，并把 react-query queryKey 改成 `["my-generations", "exclude-agent", token]` —— 跟 `/agents` Drawer 的 queryKey（不带 `exclude-agent` 段）分开，避免一边的 `setQueryData` / `invalidateQueries` 把另一边的缓存搞污。`saveLogMutation.onSuccess` 的乐观写入也同步用新 key 落点，保证「点开始生成 → 列表立刻刷新出现新记录」依然瞬时。
+  - 隔离结果：`/image` 左侧只看到从 `/image` 和 `/canvas` 发起的记录；`/agents` Drawer 只看到从角色工作台发起的记录；两边内容互不重叠，DB 里仍然是一张 `generations` 表。
 
 + [修复] **后端业务错误（如「额度不足，请联系管理员」）在前端被降级显示成「请求失败」**：根因是 `services/api/image.ts` 的 `requestGeneration` / `requestEdit` 包了一层「外层 try 抓所有 error → 再 throw new Error(readAxiosError(error, "请求失败"))」的兜底逻辑——本意是处理网络层错误，结果把内层 envelope 解析后已经正确提取的 `error.message`（中文业务错误）又走了一遍 readAxiosError 流程；这条流程在某些边缘情况（envelope.msg 短暂被覆盖、Error 对象被特殊属性误判成 AxiosError 等）下会把消息降级到 fallback "请求失败"。修复方式：拆成两段，先做 axios 请求只 catch **「网络层失败」**，然后**直接**读 envelope.code / msg，envelope.msg（如「额度不足，请联系管理员」）现在能 100% 透传到 UI 的 FailedImageCard / 角色卡的错误条 / 顶部 toast。同时给 `readEnvelopeError` / `readAxiosError` 加了 `msg.trim() && msg !== "ok"` 防御性判断，避免空 msg / 兜底 "ok" 串进错误链；envelope 非空但格式异常时也会走 `describeStatus` 兜底。失败时 console.error 落一行原始 envelope 内容，DevTools 能直接复盘。
 

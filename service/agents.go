@@ -91,7 +91,7 @@ func SaveMyAgent(userID string, item model.Agent) (model.Agent, error) {
 	return repository.SaveAgent(item)
 }
 
-// DeleteMyAgent 删除当前用户的角色。
+// DeleteMyAgent 删除当前用户的角色；级联清理头像 + 参考图（如果别处没在引用）。
 func DeleteMyAgent(userID string, id string) error {
 	if userID == "" {
 		return errors.New("请先登录")
@@ -103,7 +103,22 @@ func DeleteMyAgent(userID string, id string) error {
 	if !ok || saved.UserID != userID {
 		return errors.New("角色不存在")
 	}
-	return repository.DeleteAgent(id)
+	if err := repository.DeleteAgent(id); err != nil {
+		return err
+	}
+	keySet := map[string]bool{}
+	extractImageKeysFromString(saved.AvatarURL, keySet)
+	for _, k := range saved.ReferenceImageKeys {
+		if k != "" {
+			keySet[k] = true
+		}
+	}
+	keys := make([]string, 0, len(keySet))
+	for k := range keySet {
+		keys = append(keys, k)
+	}
+	CleanupImagesByKeysIfOrphan(userID, keys)
+	return nil
 }
 
 // IncrementAgentUsage 角色每次发起一次生图后 +1。仅在生成成功时调用，失败/被中止不计数。

@@ -46,5 +46,19 @@ func SaveCanvas(userID string, item model.Canvas) (model.Canvas, error) {
 }
 
 func DeleteCanvas(userID string, id string) error {
-	return repository.DeleteCanvas(userID, id)
+	// 删前先把 canvas.data 里所有 storageKey 攒出来；canvas 是自由 JSON 结构，
+	// 用 walkJSONForImageKeys 递归扫整棵树。
+	saved, _, _ := repository.GetCanvas(userID, id)
+	if err := repository.DeleteCanvas(userID, id); err != nil {
+		return err
+	}
+	keySet := map[string]bool{}
+	extractImageKeysFromString(saved.CoverURL, keySet)
+	walkJSONForImageKeys(saved.Data, keySet)
+	keys := make([]string, 0, len(keySet))
+	for k := range keySet {
+		keys = append(keys, k)
+	}
+	CleanupImagesByKeysIfOrphan(userID, keys)
+	return nil
 }

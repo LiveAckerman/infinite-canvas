@@ -64,7 +64,7 @@ func DeletePublicAsset(id string) error {
 	return repository.DeleteAsset(id)
 }
 
-// DeleteMyAsset 删除当前用户的私有素材。
+// DeleteMyAsset 删除当前用户的私有素材；删完后清理可能被孤立的关联图片。
 func DeleteMyAsset(userID string, id string) error {
 	saved, ok, err := repository.GetAssetByID(id)
 	if err != nil {
@@ -73,7 +73,18 @@ func DeleteMyAsset(userID string, id string) error {
 	if !ok || saved.UserID != userID || saved.Visibility != model.AssetVisibilityPrivate {
 		return errors.New("素材不存在")
 	}
-	return repository.DeleteAsset(id)
+	if err := repository.DeleteAsset(id); err != nil {
+		return err
+	}
+	keySet := map[string]bool{}
+	extractImageKeysFromString(saved.CoverURL, keySet)
+	extractImageKeysFromString(saved.URL, keySet)
+	keys := make([]string, 0, len(keySet))
+	for k := range keySet {
+		keys = append(keys, k)
+	}
+	CleanupImagesByKeysIfOrphan(userID, keys)
+	return nil
 }
 
 func saveAsset(item model.Asset) (model.Asset, error) {

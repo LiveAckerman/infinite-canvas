@@ -32,6 +32,7 @@ func parseQuery(r *http.Request) model.Query {
 	page, _ := strconv.Atoi(q.Get("page"))
 	pageSize, _ := strconv.Atoi(q.Get("pageSize"))
 	hasAgent := q.Get("hasAgent")
+	excludeAgent := q.Get("excludeAgent")
 	return model.Query{
 		Keyword:    q.Get("keyword"),
 		Tags:       q["tag"],
@@ -40,8 +41,9 @@ func parseQuery(r *http.Request) model.Query {
 		Visibility: q.Get("visibility"),
 		AgentID:    q.Get("agentId"),
 		// 接受 "1" / "true" 两种常见前端写法
-		HasAgent: hasAgent == "1" || hasAgent == "true",
-		Page:     page,
-		PageSize: pageSize,
+		HasAgent:     hasAgent == "1" || hasAgent == "true",
+		ExcludeAgent: excludeAgent == "1" || excludeAgent == "true",
+		Page:         page,
+		PageSize:     pageSize,
 	}
 }
