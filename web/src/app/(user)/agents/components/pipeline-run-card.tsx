@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronRight, ClipboardPaste, Copy, Download, ImagePlus, Loader2, Play, RotateCw, Trash2, Upload } from "lucide-react";
-import { App, Button, Checkbox, Tag, Tooltip, Typography } from "antd";
+import { App, Button, Checkbox, Image, Tag, Tooltip, Typography } from "antd";
 import { useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent } from "react";
 
 import { useImageUploader } from "@/lib/use-image-uploader";
@@ -195,22 +195,25 @@ export function PipelineRunCard({ run, onOpen, onDownload, onDelete, onDuplicate
           ) : null}
         </div>
       ) : (
-        <div className="hover-scrollbar flex items-center gap-1.5 overflow-x-auto pb-1">
-          <StepThumb url={run.seedKey ? imageUrl(run.seedKey) : ""} label="原图" status="seed" />
-          {visibleSteps.map((step, index) => (
-            <span key={step.stepId} className="flex shrink-0 items-center gap-1.5">
-              <ChevronRight className="size-3.5 shrink-0 text-stone-400" />
-              <StepThumb
-                url={step.outputKey ? imageUrl(step.outputKey) : ""}
-                label={`#${index + 1} ${step.agentName || "已删除"}`}
-                status={step.status}
-              />
-            </span>
-          ))}
-          {hiddenCount > 0 ? (
-            <span className="ml-1 shrink-0 text-xs text-stone-400">+{hiddenCount} 步</span>
-          ) : null}
-        </div>
+        // PreviewGroup 包裹整行缩略图：点任意一张能打开全屏预览 + 左右切换
+        <Image.PreviewGroup>
+          <div className="hover-scrollbar flex items-center gap-1.5 overflow-x-auto pb-1">
+            <StepThumb url={run.seedKey ? imageUrl(run.seedKey) : ""} label="原图" status="seed" />
+            {visibleSteps.map((step, index) => (
+              <span key={step.stepId} className="flex shrink-0 items-center gap-1.5">
+                <ChevronRight className="size-3.5 shrink-0 text-stone-400" />
+                <StepThumb
+                  url={step.outputKey ? imageUrl(step.outputKey) : ""}
+                  label={`#${index + 1} ${step.agentName || "已删除"}`}
+                  status={step.status}
+                />
+              </span>
+            ))}
+            {hiddenCount > 0 ? (
+              <span className="ml-1 shrink-0 text-xs text-stone-400">+{hiddenCount} 步</span>
+            ) : null}
+          </div>
+        </Image.PreviewGroup>
       )}
 
       <div className="flex flex-wrap gap-2">
@@ -249,7 +252,17 @@ function StepThumb({ url, label, status }: { url: string; label: string; status:
     <Tooltip title={label}>
       <div className={`flex size-12 shrink-0 items-center justify-center overflow-hidden rounded-md bg-stone-50 ring-2 ${ringColor} dark:bg-stone-900`}>
         {url ? (
-          <img src={url} alt={label} className="size-full object-cover" />
+          // 用 antd Image 替代原生 img，点击弹全屏预览（外层 Image.PreviewGroup 串起所有 thumb）。
+          // rootClassName 强制让 antd 外层 span 充满 size-12 容器，不破坏现有样式。
+          <Image
+            src={url}
+            alt={label}
+            width={48}
+            height={48}
+            className="!size-12 object-cover"
+            rootClassName="!block !size-12 cursor-zoom-in"
+            preview={{ mask: false }}
+          />
         ) : status === "running" ? (
           <Loader2 className="size-4 animate-spin text-blue-500" />
         ) : (

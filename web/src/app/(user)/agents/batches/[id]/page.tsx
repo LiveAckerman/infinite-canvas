@@ -1,7 +1,7 @@
 "use client";
 
 import { AlertTriangle, ArrowLeft, Download, Play, RefreshCw, Trash2 } from "lucide-react";
-import { App, Button, Progress, Tag, Typography } from "antd";
+import { App, Button, Image, Progress, Tag, Typography } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -655,37 +655,54 @@ function PostRunCard({
         {statusPill}
       </div>
 
-      {/* 数据源缩略图横排（小图叠放显示，避免占太多空间） */}
-      <div className="flex items-center gap-2">
-        <span className="shrink-0 text-[11px] text-stone-500 dark:text-stone-400">数据源 {sourceKeys.length} 张</span>
-        <div className="flex flex-1 items-center gap-1 overflow-x-auto">
-          {sourceKeys.length > 0 ? sourceKeys.slice(0, 8).map((key, idx) => (
-            <img
-              key={`${key}-${idx}`}
-              src={imageUrl(key)}
-              alt=""
-              className="size-10 shrink-0 rounded border border-stone-200 object-cover dark:border-stone-800"
-            />
-          )) : (
-            <span className="text-[11px] text-amber-600 dark:text-amber-400">⚠ 暂未解析到可用数据源（等待主条阶段完成）</span>
-          )}
+      {/* PreviewGroup 串联本卡所有图（sources + 产物）：点任意一张能全屏预览 + 左右切换 */}
+      <Image.PreviewGroup>
+        {/* 数据源缩略图横排（小图叠放显示，避免占太多空间）；可点击放大 */}
+        <div className="flex items-center gap-2">
+          <span className="shrink-0 text-[11px] text-stone-500 dark:text-stone-400">数据源 {sourceKeys.length} 张</span>
+          <div className="flex flex-1 items-center gap-1 overflow-x-auto">
+            {sourceKeys.length > 0 ? sourceKeys.slice(0, 8).map((key, idx) => (
+              <Image
+                key={`${key}-${idx}`}
+                src={imageUrl(key)}
+                alt={`数据源 ${idx + 1}`}
+                width={40}
+                height={40}
+                className="!size-10 rounded border border-stone-200 object-cover dark:border-stone-800"
+                rootClassName="!block !size-10 shrink-0 cursor-zoom-in"
+                preview={{ mask: false }}
+              />
+            )) : (
+              <span className="text-[11px] text-amber-600 dark:text-amber-400">⚠ 暂未解析到可用数据源（等待主条阶段完成）</span>
+            )}
+          </div>
         </div>
-      </div>
 
-      {/* 产物 / 错误 */}
-      {outputKey ? (
-        <div className="overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
-          <img src={imageUrl(outputKey)} alt="产物" className="!h-32 w-full object-contain" />
-        </div>
-      ) : run.status === "failed" && step?.errorMessage ? (
-        <div className="rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] text-red-600 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
-          <span className="line-clamp-3">{step.errorMessage}</span>
-        </div>
-      ) : (
-        <div className="grid h-20 place-items-center rounded-md bg-stone-50 text-[11px] text-stone-400 dark:bg-stone-900">
-          {run.status === "running" ? "正在生成…" : "暂无产物"}
-        </div>
-      )}
+        {/* 产物 / 错误：产物图可点击放大 */}
+        {outputKey ? (
+          <div className="overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
+            <Image
+              src={imageUrl(outputKey)}
+              alt="产物"
+              className="!h-32 w-full object-contain cursor-zoom-in"
+              rootClassName="!block !w-full"
+              preview={{ mask: "点击查看大图" }}
+            />
+          </div>
+        ) : null}
+      </Image.PreviewGroup>
+      {/* 无产物时：失败显示错误信息，其它显示占位文案 */}
+      {!outputKey ? (
+        run.status === "failed" && step?.errorMessage ? (
+          <div className="rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] text-red-600 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
+            <span className="line-clamp-3">{step.errorMessage}</span>
+          </div>
+        ) : (
+          <div className="grid h-20 place-items-center rounded-md bg-stone-50 text-[11px] text-stone-400 dark:bg-stone-900">
+            {run.status === "running" ? "正在生成…" : "暂无产物"}
+          </div>
+        )
+      ) : null}
 
       {/* 操作按钮 */}
       <div className="flex flex-wrap gap-1.5">
