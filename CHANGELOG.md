@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## v0.0.23 - 2026-05-22
+
++ [新增] **角色工作台两处提示词输入框接入「提示词优化」**：跟 `/image` 工作台 / 画布节点 prompt 面板 / 画布助手输入框一样，复用 `<PromptImproveBar>` 组件——
+  - **并行模式卡片的「附加说明」TextArea** 下方：读卡片当前 `extraNote`，点优化后预览面板出在 TextArea 下面，接受时调 `handleExtraNoteChange(improved)` 自动 800ms 防抖 PUT 回 `agent_workstation_cards` 表；`status === "running"` 期间按钮禁用。
+  - **角色编辑 Modal 的「系统提示词」Form.Item** 下方：通过 `form.getFieldValue("systemPrompt")` 读当前值，接受时 `form.setFieldsValue({ systemPrompt: improved })` 写回；`submitting` 时禁用。
+  - 复用 chat 限流（5/min；admin 跳过）；服务端硬编码 system prompt（前端拿不到 system prompt 也拿不到 API Key）。
+
++ [调整] **角色工作台并行模式：成功后加「重做」按钮，改附加说明可直接重做**：之前生成成功后只有「下载 / 加入素材 / 再来一张」三个按钮，「再来一张」点了只清空回 idle，用户还要再点一次「开始生成」才能跑——两步操作。改成 ——
+  - **新增「重做」蓝色主按钮**（`RotateCw` 图标）：直接调 `generate()` 用**当前**的原图 + 附加说明（用户可能在 success 状态下改过）重新跑一次。status 立即切回 running，新产物回来时 setResult 覆盖旧的。tooltip 「用当前的原图和附加说明直接重做」。
+  - 「再来一张」改成 `type="text"` 的次要「清空」按钮，仍调 `resetForNext()` 清空回 idle 状态，留给「想从头开始换图换说明」的场景。
+  - 附加说明 TextArea 在 success 状态本来就允许编辑（debounce 800ms PUT 回库），现在配合「重做」按钮形成完整闭环：改说明 → 点重做 → 拿新产物。
+  - 行为不影响产物上云：生成完成后跟之前一样调 `onPersistCard({ status, outputKey, errorMessage, durationMs })` 推到 `agent_workstation_cards` 表。
+
 ## v0.0.22 - 2026-05-22
 
 + [调整] **`/image` 二次生成改成编辑现有 record，不再新建**：上一版「二次生成产物追加」改的只是 UI 累加（每点一次仍新建一条 generation record，左侧列表越点越多）。这次进一步把数据模型也改了：当 `previewLog` 存在且不是从「微调」按钮触发时，generate() **直接 PUT 编辑现有 record**，不创建新 placeholder：count / thumbnails / errors / durationMs 全部累加；prompt / refs / size / quality / requestParams 取本次最新；URL 不变。三种触发的语义：

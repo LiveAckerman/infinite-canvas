@@ -6,6 +6,7 @@ import { useEffect, useRef } from "react";
 
 import { useImageUploader } from "@/lib/use-image-uploader";
 import { imageUrl } from "@/services/image-storage";
+import { PromptImproveBar } from "@/components/prompt-improve-panel";
 import type { Agent } from "@/services/api/agents";
 
 import { AgentAvatar } from "./agent-avatar";
@@ -168,6 +169,13 @@ export function AgentEditModal({ open, editing, onClose, onSubmit, submitting }:
         >
           <Input.TextArea rows={6} placeholder="例如：你是一个商品白底图大师，请抠出主体并将背景换成纯白色，保持原始光影与细节。" />
         </Form.Item>
+        {/* 跟 /image 工作台一致的「提示词优化」入口；读 form 当前值，接受后 setFieldsValue 写回 */}
+        <PromptImproveBar
+          className="-mt-2 mb-4"
+          getPrompt={() => form.getFieldValue("systemPrompt") || ""}
+          onAccept={(improved) => form.setFieldsValue({ systemPrompt: improved })}
+          disabled={submitting}
+        />
         <Form.Item
           label={`参考图（可选，最多 ${MAX_REFERENCE_IMAGES} 张）`}
           extra="不传也可以；如果加了，每次该角色生图都会和你在工作台上传的图一起作为参考。常用于「按这种风格 / 构图来」类的角色。"

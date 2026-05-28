@@ -8,6 +8,7 @@ import { defaultConfig } from "@/lib/ai-config";
 import { createId } from "@/lib/id";
 import { formatDuration, readImageMeta } from "@/lib/image-utils";
 import { useImageUploader } from "@/lib/use-image-uploader";
+import { PromptImproveBar } from "@/components/prompt-improve-panel";
 import type { AgentWorkstationCard } from "@/services/api/agent-workstations";
 import { saveGeneration } from "@/services/api/generations";
 import { requestEdit, requestGeneration, type GeneratedImage as GeneratedImagePayload } from "@/services/api/image";
@@ -469,6 +470,13 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
         disabled={status === "running"}
       />
 
+      {/* 跟 /image 工作台 / 画布节点 prompt 面板 / 画布助手输入框一样，提供「提示词优化」按钮 */}
+      <PromptImproveBar
+        getPrompt={() => extraNote}
+        onAccept={(improved) => handleExtraNoteChange(improved)}
+        disabled={status === "running"}
+      />
+
       {status === "running" ? (
         <div className="flex items-center justify-center gap-2 rounded-md bg-stone-50 p-3 text-sm text-stone-500 dark:bg-stone-900 dark:text-stone-400">
           <LoaderCircle className="size-4 animate-spin" />
@@ -493,7 +501,11 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
           <div className="flex flex-wrap gap-1.5">
             <Button size="small" icon={<Download className="size-3.5" />} onClick={downloadResult}>下载</Button>
             <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => void saveResultToAssets()}>加入素材</Button>
-            <Button size="small" onClick={resetForNext}>再来一张</Button>
+            {/* 「重做」：用当前的原图 + 附加说明（用户可能改过）直接跑一次。
+                generate() 自己会把 status 切到 running、新结果回来后 setResult 覆盖旧的产物，
+                不用先 reset。想真的清回 idle 走「清空」按钮。 */}
+            <Button size="small" type="primary" icon={<RotateCw className="size-3.5" />} onClick={() => void generate()} title="用当前的原图和附加说明直接重做">重做</Button>
+            <Button size="small" type="text" onClick={resetForNext} title="清空当前产物回到待生成状态">清空</Button>
           </div>
         </div>
       ) : null}
