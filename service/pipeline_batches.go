@@ -872,19 +872,19 @@ func StreamPipelineBatchZip(userID string, id string, w io.Writer) error {
 	zw := zip.NewWriter(w)
 	defer zw.Close()
 
-	// 主条：按 position asc
-	// position 已是 0..N-1
+	// 主条：按 position asc（position 已是 0..N-1）。
+	// 全部平铺到 zip 根目录，靠文件名前缀区分（不嵌套文件夹）。
 	for _, run := range detail.MainRuns {
 		runName := sanitizeForFilename(run.PipelineNameSnap)
 		prefix := fmt.Sprintf("%02d_main_%s", run.Position+1, runName)
 		if run.SeedKey != "" {
-			_ = addImageToZip(zw, run.SeedKey, prefix+"/00_seed")
+			_ = addImageToZip(zw, run.SeedKey, prefix+"_00_seed")
 		}
 		for stepIndex, step := range run.Steps {
 			if step.OutputKey == "" {
 				continue
 			}
-			nameHint := fmt.Sprintf("%s/%02d_%s", prefix, stepIndex+1, sanitizeForFilename(step.AgentNameSnap))
+			nameHint := fmt.Sprintf("%s_%02d_%s", prefix, stepIndex+1, sanitizeForFilename(step.AgentNameSnap))
 			if step.Status == model.PipelineRunStepFailed {
 				nameHint += "_failed"
 			}
@@ -921,7 +921,7 @@ func StreamPipelineBatchZip(userID string, id string, w io.Writer) error {
 			if key == "" {
 				continue
 			}
-			_ = addImageToZip(zw, key, fmt.Sprintf("%s/sources/%s", postPrefix, label))
+			_ = addImageToZip(zw, key, fmt.Sprintf("%s_source_%s", postPrefix, label))
 		}
 		// 各 post run 的产物平铺
 		for postIndex, run := range detail.PostRuns {
@@ -929,7 +929,7 @@ func StreamPipelineBatchZip(userID string, id string, w io.Writer) error {
 				if step.OutputKey == "" {
 					continue
 				}
-				nameHint := fmt.Sprintf("%s/%02d_%s", postPrefix, postIndex+1, sanitizeForFilename(step.AgentNameSnap))
+				nameHint := fmt.Sprintf("%s_%02d_%s", postPrefix, postIndex+1, sanitizeForFilename(step.AgentNameSnap))
 				if step.Status == model.PipelineRunStepFailed {
 					nameHint += "_failed"
 				}

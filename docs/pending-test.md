@@ -365,3 +365,4 @@
   - 在 Tab A 创建批量 + 全部启动 → 主条还在跑时，Tab B 同账号同时打开 `/agents`，**绝对不会**抢跑同 batch 的 post run（post run 的 status 此时是 paused，根本不会进 queued）。
   - 主条全 done 后由后端推 post 进 queued，调度器才会拿起来跑。前端 gate 是双重保险：即便缓存里 post 已经 queued 但 main 还没全 done（极少 case），前端也跳过不跑。
   - post run 详情页（即 `/agents/runs/{postRunId}`）只有 1 个 step，「输入」缩略框显示多张（sources 解析出的产物），不是单张。点「重做」走 sourceRefs 不走 iterate 分支。
+- 批量任务 zip 下载平铺：跑完一个批量任务（含主条 + 后处理），点「下载所有产物 (zip)」→ 解压后**所有图片都在 zip 根目录**，没有嵌套文件夹；文件名形如 `01_main_白底图_01_白底图工人.png` / `post_合成_source_01_from-run01-seed.png` / `post_合成_01_精修.png`，靠前缀区分主条 / 后处理 / 第几步 / 哪个角色，不重名。单条执行流程的 zip 也仍是平铺。

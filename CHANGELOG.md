@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.0.34 - 2026-05-28
+
++ [调整] 批量任务下载 zip 改成所有图片平铺在根目录，不再嵌套子文件夹。文件名靠前缀区分主条 / 后处理 / 第几步 / 哪个角色，例如 `01_main_白底图_01_白底图工人.png`、`post_合成_source_01_from-run01-seed.png`，解压后找图更方便。
+
 ## v0.0.33 - 2026-05-28
 
 + [新增] **批量任务列表卡「下载 zip」按钮加 loading 动画**：批量任务 Tab 列表卡的下载按钮之前没 loading 反馈，zip 流式打包大批次可能几秒到十几秒，用户狂点造成重复打包请求。现在 `BatchCard` 加 `downloading` prop，`agents/page.tsx` 用 `downloadingBatchId` state 锁定同时只允许一个 batch 下载，按钮 antd `loading={downloading}` 转圈显示；下载完成 / 失败自动解锁。batch detail 页顶栏「下载所有产物 (zip)」和单 run detail 页的「下载所有产物 (zip)」之前就有 loading state，本次确认一致。
