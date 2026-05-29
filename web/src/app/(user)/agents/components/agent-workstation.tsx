@@ -1,6 +1,6 @@
 "use client";
 
-import { ClipboardPaste, Download, FolderPlus, ImagePlus, LoaderCircle, RotateCw, Sparkles, Upload, X } from "lucide-react";
+import { ChevronDown, ChevronUp, ClipboardPaste, Download, FolderPlus, ImagePlus, LoaderCircle, RotateCw, Sparkles, Upload, X } from "lucide-react";
 import { App, Button, Image, Input, Tag } from "antd";
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent } from "react";
 
@@ -103,6 +103,23 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
   const startedAtRef = useRef(0);
   // extraNote 防抖 PUT 计时器
   const extraNotePersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 卡片折叠状态：纯 UI 偏好，按角色 id 存 localStorage（不上云）。
+  // 折叠后只留头部（头像 + 名字 + 状态 + 产物缩略图），把上传区 / 附加说明 / 结果都收起来，
+  // 工作区里挂很多角色时省垂直空间、方便扫一眼各卡状态。
+  const collapseStorageKey = `infinite-canvas:agents:card-collapsed:${agent.id}`;
+  const [collapsed, setCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(collapseStorageKey) === "1";
+  });
+  const toggleCollapsed = () => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(collapseStorageKey, next ? "1" : "0");
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (status !== "running") return;
@@ -383,12 +400,20 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
 
   return (
     <div className="flex w-full min-w-0 flex-col gap-3 rounded-lg border border-stone-200 bg-card p-3 shadow-sm dark:border-stone-800">
-      {/* 头部第 1 行：头像 + 角色名（可点编辑） + 右上 X 移出。
-          状态徽标移到第 2 行单独占位，避免长名 + 长状态 + X 三者抢宽度。 */}
+      {/* 头部第 1 行：头像 + 角色名（可点编辑） + 折叠按钮 + 右上 X 移出。 */}
       <div className="flex items-center gap-2">
         <AgentAvatar name={agent.name} avatarUrl={agent.avatarUrl} size={32} />
         <button type="button" onClick={onEdit} className="min-w-0 flex-1 text-left">
           <div className="truncate text-sm font-semibold hover:underline">{agent.name}</div>
+        </button>
+        <button
+          type="button"
+          className="grid size-7 shrink-0 place-items-center rounded text-stone-400 transition hover:bg-stone-100 hover:text-stone-700 dark:hover:bg-stone-800 dark:hover:text-stone-200"
+          onClick={toggleCollapsed}
+          aria-label={collapsed ? "展开" : "折叠"}
+          title={collapsed ? "展开" : "折叠"}
+        >
+          {collapsed ? <ChevronDown className="size-4" /> : <ChevronUp className="size-4" />}
         </button>
         <button
           type="button"
@@ -400,8 +425,21 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
           <X className="size-3.5" />
         </button>
       </div>
-      <div className="flex justify-end">{statusPill}</div>
+      {/* 状态行：折叠时左侧补一张产物 / 原图小缩略图，让收起后也能一眼看到这张卡的成果。 */}
+      <div className="flex items-center justify-between gap-2">
+        {collapsed && (result?.url || reference?.dataUrl) ? (
+          <img
+            src={result?.url || reference?.dataUrl}
+            alt=""
+            className="size-8 shrink-0 rounded border border-stone-200 object-cover dark:border-stone-800"
+          />
+        ) : <span />}
+        {statusPill}
+      </div>
 
+      {/* 折叠后只保留上面的头部 + 状态行；下面的参考图 / 上传 / 附加说明 / 结果 / 生成按钮全收起。 */}
+      {collapsed ? null : (
+      <>
       {agent.referenceImageKeys?.length ? (
         <div className="flex items-center gap-2 rounded-md bg-stone-50 px-2.5 py-1.5 text-xs text-stone-600 dark:bg-stone-900 dark:text-stone-400">
           <div className="flex shrink-0 -space-x-2">
@@ -522,6 +560,8 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
           开始生成
         </Button>
       ) : null}
+      </>
+      )}
     </div>
   );
 }

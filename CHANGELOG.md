@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v0.0.36 - 2026-05-29
+
++ [修复] **客户端断开后后端仍把图生图跑完并扣分（钱扣了图没拿到）**：线上排查 eecopt 用户「一直失败还扣分」，发现后端 `/api/v1/images/edits` 全部返回 200（耗时 40s~2min 都成功生成、扣分、写 consume 流水），但 nginx access.log 记了大量 `499`（客户端主动断开）——用户嫌生图慢，连点重做 / 刷新 / 切走，浏览器把还在跑的请求 abort 了。**而 Go 后端不感知客户端已断开，继续把上游图生图跑完、成功、扣分**，前端这边拿不到响应显示「请求失败」。结果：eecopt 扣了 27 分却 0 张成功产出。修复分两段把「客户端断开」一路传导到后端，触发退还预扣：
+  - **后端**：`postUpstreamJSON` / `/v1/images/edits` 调上游改用 `http.NewRequestWithContext(r.Context(), ...)`。客户端断开 → `r.Context()` 取消 → `client.Do` 返回 `context.Canceled` → `doUpstreamWithRetry` 不重试直接返回错误 → handler 走 `refundOnFailure` 退还预扣额度（generations / edits 都是 reserve-then-confirm，失败路径本就退费，缺的就是「断开能触发失败路径」这一环）。
+  - **前端 Route Handler**：`app/api/v1/images/{generations,edits}/route.ts` 转发后端的 `fetch` 补上 `signal: req.signal`。否则浏览器断开后 Next 仍把到 Go 的连接挂着，Go 的 `r.Context()` 不会取消。abort 时返回 499 占位，不抛 unhandled rejection。
+  - 配合之前已加的「上游 502/503/504 自动重试」「真实错误透传」，整条链路：客户端在 → 慢也等得到图；客户端断开 → 立即取消并退费、不白扣。
+
++ [新增] **并行模式工作台卡片可折叠**：每张角色卡头部加折叠 / 展开按钮（`ChevronUp` / `ChevronDown`）。折叠后只保留头部（头像 + 名字 + 状态 pill + 一张产物/原图小缩略图），把参考图 chip、原图上传区、附加说明、提示词优化、结果图、生成按钮全部收起，工作区挂很多角色时省垂直空间、方便一眼扫各卡状态。折叠状态按角色 id 存 localStorage（`infinite-canvas:agents:card-collapsed:{agentId}`，纯 UI 偏好不上云），刷新保留。配合把工作区 grid 从 `items-stretch` 改成 `items-start`，折叠的卡片真正变矮（不会被同行展开的卡撑高留白）。
+
 ## v0.0.35 - 2026-05-29
 
 + [修复] **流水线 / 批次刷新后「已完成的 run 又变成运行中」**：上一版加的「刷新后自动恢复孤儿 run」逻辑漏了一种情况——一条 run 的所有步骤其实都已经跑完（success），只是上次最后一次 persist 终态的 PUT 没落库，`run.status` 卡在 `running`。刷新后恢复逻辑把它当孤儿又「拉起来重跑」，于是显示「运行中」（还可能把已完成的产物重新跑一遍 / 遇上游抖动失败）。修复：`scheduleFromCache` 恢复孤儿前先判断 `runHasPendingWork`（是否还有 idle / running 的步骤），如果**没有未完成步骤**（全 success / 或 success+failed 已终结），直接按步骤结果收敛成正确终态（`computeRunFinalStatus`：全 success→success / 有失败→partial / 全失败→failed）并 PUT 回库，**不重跑**；只有真的还有 idle / running 步骤（跑一半断了）才走原来的 recover + 重跑路径。

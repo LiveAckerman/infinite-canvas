@@ -536,7 +536,7 @@ function AgentsWorkbench() {
           <p className="text-xs text-stone-400">在左侧「我的角色」点「加入工作区」把角色加进来，同页并行处理图片</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 items-stretch gap-3 md:grid-cols-2 2xl:grid-cols-3">
+        <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-2 2xl:grid-cols-3">
           {workspaceAgents.map((agent) => (
             <AgentWorkstation
               key={agent.id}

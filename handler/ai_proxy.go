@@ -2,7 +2,9 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -69,7 +71,7 @@ func AIImageGenerations(w http.ResponseWriter, r *http.Request) {
 		_ = balance // 真正写流水放到上游成功之后；这里只保证「能扣到」
 	}
 
-	raw, status, err := postUpstreamJSON(cfg, "/v1/images/generations", payload)
+	raw, status, err := postUpstreamJSON(r.Context(), cfg, "/v1/images/generations", payload)
 	if err != nil {
 		refundOnFailure(user, isAdmin, reserved)
 		Fail(w, err.Error())
@@ -173,8 +175,10 @@ func AIImageEdits(w http.ResponseWriter, r *http.Request) {
 	payloadBytes := bodyBuf.Bytes()
 	contentType := writer.FormDataContentType()
 	client := &http.Client{Timeout: upstreamTimeout}
+	// 带上 r.Context()：客户端断开（刷新 / 关页面 / 连点 abort）时上游请求随之取消，
+	// 走下面的 refundOnFailure 退还预扣额度，避免「客户端早走、后端跑完扣分」白扣。
 	raw, status, err := doUpstreamWithRetry(client, func() (*http.Request, error) {
-		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
 		if err != nil {
 			return nil, err
 		}
@@ -374,7 +378,7 @@ func requireEnabledConfig(w http.ResponseWriter) (model.AIConfig, bool) {
 	return cfg, true
 }
 
-func postUpstreamJSON(cfg model.AIConfig, path string, payload any) ([]byte, int, error) {
+func postUpstreamJSON(ctx context.Context, cfg model.AIConfig, path string, payload any) ([]byte, int, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, 0, err
@@ -382,8 +386,10 @@ func postUpstreamJSON(cfg model.AIConfig, path string, payload any) ([]byte, int
 	endpoint := upstreamURL(cfg.BaseURL, path)
 	client := &http.Client{Timeout: upstreamTimeout}
 	// buildReq 每次构造全新请求（body 用 bytes.NewReader 可重放），交给重试逻辑。
+	// 带上 ctx（= 请求的 r.Context()）：客户端断开连接时 ctx 取消，client.Do 立即返回
+	// context.Canceled，doUpstreamWithRetry 不重试、直接返回错误，让上层退还预扣额度。
 	return doUpstreamWithRetry(client, func() (*http.Request, error) {
-		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
@@ -430,7 +436,13 @@ func doUpstreamWithRetry(client *http.Client, buildReq func() (*http.Request, er
 		}
 		resp, err := client.Do(req)
 		if err != nil {
-			// 网络层错误（连接重置 / 超时等）也算瞬时故障，继续重试
+			// 客户端断开（用户刷新 / 关页面 / 连续点重做 abort 旧请求 → r.Context() 取消）：
+			// 不重试、立即返回，让上层走失败分支退还预扣额度，避免「客户端早走了、后端还把上游
+			// 跑完扣分」的钱扣了图没拿到的问题。
+			if errors.Is(err, context.Canceled) || errors.Is(req.Context().Err(), context.Canceled) {
+				return nil, 0, fmt.Errorf("请求已取消：%s", err.Error())
+			}
+			// 其它网络层错误（连接重置 / 超时等）算瞬时故障，继续重试
 			lastErr, lastRaw, lastStatus = err, nil, 0
 			log.Printf("upstream %s network error (attempt %d/%d): %v", req.URL.Path, attempt+1, upstreamMaxAttempts, err)
 			continue

@@ -16,19 +16,28 @@ export async function POST(req: NextRequest) {
   const auth = req.headers.get("authorization");
   if (auth) headers.Authorization = auth;
 
-  const upstream = await fetch(`${API_BASE}/api/v1/images/generations`, {
-    method: "POST",
-    headers,
-    body: req.body,
-    // Node 18+ 流式 body 必须声明 duplex；TS 类型暂未收录该字段。
-    // @ts-expect-error duplex 不在标准 RequestInit 类型里
-    duplex: "half",
-  });
+  try {
+    const upstream = await fetch(`${API_BASE}/api/v1/images/generations`, {
+      method: "POST",
+      headers,
+      body: req.body,
+      // 把浏览器侧的 abort 透传给后端：客户端断开时后端 r.Context() 取消 → 退还预扣额度。
+      signal: req.signal,
+      // Node 18+ 流式 body 必须声明 duplex；TS 类型暂未收录该字段。
+      // @ts-expect-error duplex 不在标准 RequestInit 类型里
+      duplex: "half",
+    });
 
-  return new Response(upstream.body, {
-    status: upstream.status,
-    headers: {
-      "Content-Type": upstream.headers.get("content-type") || "application/json",
-    },
-  });
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers: {
+        "Content-Type": upstream.headers.get("content-type") || "application/json",
+      },
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      return new Response(null, { status: 499 });
+    }
+    throw error;
+  }
 }
