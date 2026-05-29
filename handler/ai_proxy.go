@@ -169,27 +169,27 @@ func AIImageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 
 	endpoint := upstreamURL(cfg.BaseURL, "/v1/images/edits")
-	req, err := http.NewRequest(http.MethodPost, endpoint, bodyBuf)
-	if err != nil {
-		refundOnFailure(user, isAdmin, reserved)
-		Fail(w, "请求构造失败")
-		return
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
+	// 把 multipart body 定格成 bytes，重试时每次新建 reader 重放（bytes.Buffer 被消费后不能重读）。
+	payloadBytes := bodyBuf.Bytes()
+	contentType := writer.FormDataContentType()
 	client := &http.Client{Timeout: upstreamTimeout}
-	resp, err := client.Do(req)
+	raw, status, err := doUpstreamWithRetry(client, func() (*http.Request, error) {
+		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+		req.Header.Set("Content-Type", contentType)
+		return req, nil
+	})
 	if err != nil {
 		refundOnFailure(user, isAdmin, reserved)
-		Fail(w, "上游请求失败："+err.Error())
+		Fail(w, err.Error())
 		return
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if status < 200 || status >= 300 {
 		refundOnFailure(user, isAdmin, reserved)
-		Fail(w, parseUpstreamMessage(raw, resp.StatusCode))
+		Fail(w, parseUpstreamMessage(raw, status))
 		return
 	}
 	count := countImagePayload(raw)
@@ -380,20 +380,73 @@ func postUpstreamJSON(cfg model.AIConfig, path string, payload any) ([]byte, int
 		return nil, 0, err
 	}
 	endpoint := upstreamURL(cfg.BaseURL, path)
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, 0, err
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
-	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: upstreamTimeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, 0, fmt.Errorf("上游请求失败：%s", err.Error())
+	// buildReq 每次构造全新请求（body 用 bytes.NewReader 可重放），交给重试逻辑。
+	return doUpstreamWithRetry(client, func() (*http.Request, error) {
+		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	})
+}
+
+// upstreamMaxAttempts 含首次在内的最大尝试次数（首发 + 最多 2 次重试）。
+const upstreamMaxAttempts = 3
+
+// upstreamRetryBackoff 每次重试前的等待。索引 0 = 第 1 次重试前；超出长度则用最后一个值。
+var upstreamRetryBackoff = []time.Duration{2 * time.Second, 4 * time.Second}
+
+// retryableUpstreamStatus 判断这个 HTTP 状态码是否值得重试。
+// 502/503/504 是网关/上游瞬时故障——线上实测多为上游账号池限流（Too many concurrent
+// requests）、个别账号 token 失效、或上游 30s 超时。换个账号 / 过几秒并发降下来往往就成功，
+// 重试很可能命中可用账号。4xx 业务错误（额度 / 鉴权 / 参数）和 2xx 都不重试。
+func retryableUpstreamStatus(status int) bool {
+	return status == http.StatusBadGateway ||
+		status == http.StatusServiceUnavailable ||
+		status == http.StatusGatewayTimeout
+}
+
+// doUpstreamWithRetry 用 buildReq 每次构造全新请求（body 必须可重放），对 502/503/504 以及
+// 网络层瞬断自动重试，最多 upstreamMaxAttempts 次。返回最后一次的 raw body + status + err。
+// 注意：buildReq 里不要复用已被 http.Client 消费过的 Body，要每次新建 reader。
+func doUpstreamWithRetry(client *http.Client, buildReq func() (*http.Request, error)) ([]byte, int, error) {
+	var lastRaw []byte
+	var lastStatus int
+	var lastErr error
+	for attempt := 0; attempt < upstreamMaxAttempts; attempt++ {
+		if attempt > 0 {
+			idx := attempt - 1
+			if idx >= len(upstreamRetryBackoff) {
+				idx = len(upstreamRetryBackoff) - 1
+			}
+			time.Sleep(upstreamRetryBackoff[idx])
+		}
+		req, err := buildReq()
+		if err != nil {
+			return nil, 0, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			// 网络层错误（连接重置 / 超时等）也算瞬时故障，继续重试
+			lastErr, lastRaw, lastStatus = err, nil, 0
+			log.Printf("upstream %s network error (attempt %d/%d): %v", req.URL.Path, attempt+1, upstreamMaxAttempts, err)
+			continue
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		lastRaw, lastStatus, lastErr = raw, resp.StatusCode, nil
+		if !retryableUpstreamStatus(resp.StatusCode) {
+			return raw, resp.StatusCode, nil
+		}
+		log.Printf("upstream %s returned %d (attempt %d/%d), retrying", req.URL.Path, resp.StatusCode, attempt+1, upstreamMaxAttempts)
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	return raw, resp.StatusCode, nil
+	if lastErr != nil {
+		return nil, 0, fmt.Errorf("上游请求失败：%s", lastErr.Error())
+	}
+	return lastRaw, lastStatus, nil
 }
 
 // upstreamURL 把用户填的 baseUrl 和 path 拼成最终 URL，兼容 baseUrl 已含 /v1 的情况。

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## v0.0.35 - 2026-05-29
+
++ [修复] **流水线 / 批次刷新后「已完成的 run 又变成运行中」**：上一版加的「刷新后自动恢复孤儿 run」逻辑漏了一种情况——一条 run 的所有步骤其实都已经跑完（success），只是上次最后一次 persist 终态的 PUT 没落库，`run.status` 卡在 `running`。刷新后恢复逻辑把它当孤儿又「拉起来重跑」，于是显示「运行中」（还可能把已完成的产物重新跑一遍 / 遇上游抖动失败）。修复：`scheduleFromCache` 恢复孤儿前先判断 `runHasPendingWork`（是否还有 idle / running 的步骤），如果**没有未完成步骤**（全 success / 或 success+failed 已终结），直接按步骤结果收敛成正确终态（`computeRunFinalStatus`：全 success→success / 有失败→partial / 全失败→failed）并 PUT 回库，**不重跑**；只有真的还有 idle / running 步骤（跑一半断了）才走原来的 recover + 重跑路径。
++ [调整] **下载产物的命名规则 + 不打包原图 + 单产物直接下图**：
+  - **批量任务 zip**：不再打包原图（seed）和后处理的 sources。命名改成纯数字——主条产物 `{主条序号}.{该条内第几个产物}`（主条 1 两个产物 → `1.1`/`1.2`，一个产物 → `1.1`）；后处理产物在主条数量之后顺序累加的整数（6 个主条 → 后处理 `7`/`8`…，按 run 数算偏移，跟主条产物多少无关）。全部平铺在 zip 根目录。
+  - **单条执行流程 zip**：同样不含原图，产物按 `1`/`2`/`3` 顺序编号。
+  - **单产物直接下图**：执行流程 / 批次只有一个产物时，点「下载」直接下那张图（走 `/api/images/{key}`，按 blob 类型给 `.png`/`.jpg` 扩展名），不再套一层只有一张图的 zip。覆盖单条卡片下载、run 详情页下载、batch 详情页下载三处；batch 列表卡因为没有 step 数据仍走 zip（整批极少只有一个产物）。
+
++ [新增] **生图反代对上游 502/503/504 自动重试**：线上排查发现「上游服务异常（502 Bad Gateway）」并非 infinite-canvas 或 cpa-manager / nginx 的故障——cpa-manager 容器健康、nginx 配置正常，502 全部来自 cpa-manager 转发到 ChatGPT 时**上游账号池瞬时抖动**：`Too many concurrent requests`（并发限流）、`token_invalidated`（个别账号 token 失效）、`curl (28) timeout`（上游 30s 超时）。这类故障换个账号 / 过几秒并发降下来就好，重试很可能命中可用账号。
+  - 后端新增 `doUpstreamWithRetry(client, buildReq)`：用 `buildReq` 闭包每次构造全新请求（body 用 `bytes.NewReader` 可重放），对 **502/503/504 + 网络层瞬断** 自动重试，最多 3 次（首发 + 2 次重试），间隔 2s / 4s 退避。4xx 业务错误（额度 / 鉴权 / 参数）和 2xx 都不重试。
+  - `/v1/images/generations`（`postUpstreamJSON`）和 `/v1/images/edits`（multipart，把 body 定格成 `[]byte` 后每次新建 reader 重放）都接入。chat completions 是 SSE 流式、且影响小，暂不重试。
+  - 用户感知：偶发 502 会在后台静默重试，多数情况第 2 次就成功拿到图，不再直接弹错误。重试日志写到后端 log（`upstream ... returned 502 (attempt 2/3), retrying`）方便观测上游健康度。
+  - **根治仍在 cpa-manager 侧**：补充 / 轮换有效 ChatGPT 账号、清理失效 token、提高账号池并发容量。另建议把 cpa-manager 日志里的 `request_token`（账号 JWT）脱敏，避免日志泄露盗号。
+
 ## v0.0.34 - 2026-05-28
 
 + [调整] 批量任务下载 zip 改成所有图片平铺在根目录，不再嵌套子文件夹。文件名靠前缀区分主条 / 后处理 / 第几步 / 哪个角色，例如 `01_main_白底图_01_白底图工人.png`、`post_合成_source_01_from-run01-seed.png`，解压后找图更方便。

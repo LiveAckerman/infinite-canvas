@@ -111,3 +111,31 @@ export async function downloadPipelineRunZip(id: string, fallbackName?: string) 
   // 让浏览器读完再回收
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+// collectRunProductKeys 收集一条 run 的产物 storageKey（每步 outputKey，按步顺序；不含 seed）。
+// 用于判断「是否只有一个产物」以决定直接下图还是打 zip。
+export function collectRunProductKeys(run: PipelineRun): string[] {
+  return run.steps.map((step) => step.outputKey).filter((key): key is string => Boolean(key));
+}
+
+// downloadSingleImage 直接下载单张图（走公开的 /api/images/{key}）。
+// 用于「执行流程 / 批次只有一个产物」时，不打 zip 直接下原图。
+// 文件扩展名按 blob.type 推断（jpeg → jpg，其余 → png）。
+export async function downloadSingleImage(storageKey: string, baseName: string) {
+  const response = await fetch(`/api/images/${encodeURIComponent(storageKey)}`);
+  if (!response.ok) {
+    throw new Error(`下载失败（HTTP ${response.status}）`);
+  }
+  const blob = await response.blob();
+  const ext = blob.type === "image/jpeg" ? "jpg" : blob.type === "image/webp" ? "webp" : "png";
+  // 去掉 baseName 里可能带的 .zip / 其它扩展名，统一用图片扩展名
+  const stem = baseName.replace(/\.(zip|png|jpe?g|webp)$/i, "") || "image";
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${stem}.${ext}`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}

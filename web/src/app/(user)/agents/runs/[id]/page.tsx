@@ -12,8 +12,10 @@ import { imageUrl } from "@/services/image-storage";
 import { saveMyAsset } from "@/services/api/my-assets";
 import { fetchMyAgents, type Agent } from "@/services/api/agents";
 import {
+  collectRunProductKeys,
   deleteMyPipelineRun,
   downloadPipelineRunZip,
+  downloadSingleImage,
   fetchMyPipelineRun,
   saveMyPipelineRun,
   type PipelineRun,
@@ -113,7 +115,13 @@ function PipelineRunDetail({ runId }: { runId: string }) {
     if (!run) return;
     setDownloading(true);
     try {
-      await downloadPipelineRunZip(run.id, `${run.pipelineName || "pipeline-run"}-${run.id.slice(-6)}`);
+      const name = `${run.pipelineName || "pipeline-run"}-${run.id.slice(-6)}`;
+      const products = collectRunProductKeys(run);
+      if (products.length === 1) {
+        await downloadSingleImage(products[0], name);
+      } else {
+        await downloadPipelineRunZip(run.id, name);
+      }
     } catch (error) {
       message.error(error instanceof Error ? error.message : "下载失败");
     } finally {

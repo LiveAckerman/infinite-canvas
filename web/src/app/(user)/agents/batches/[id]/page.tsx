@@ -18,6 +18,8 @@ import {
   type RecheckPostMissingItem,
 } from "@/services/api/pipeline-batches";
 import {
+  collectRunProductKeys,
+  downloadSingleImage,
   saveMyPipelineRun,
   type PipelineRun,
   type PipelineRunListResponse,
@@ -290,7 +292,17 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
     if (!detail) return;
     setDownloading(true);
     try {
-      await downloadPipelineBatchZip(detail.batch.id, detail.batch.name || `pipeline-batch-${detail.batch.id.slice(-6)}`);
+      const name = detail.batch.name || `pipeline-batch-${detail.batch.id.slice(-6)}`;
+      // 全批次产物 = 所有 main run + post run 的每步产物。只有一个产物时直接下原图。
+      const products = [
+        ...detail.mainRuns.flatMap(collectRunProductKeys),
+        ...detail.postRuns.flatMap(collectRunProductKeys),
+      ];
+      if (products.length === 1) {
+        await downloadSingleImage(products[0], name);
+      } else {
+        await downloadPipelineBatchZip(detail.batch.id, name);
+      }
     } catch (error) {
       message.error(error instanceof Error ? error.message : "下载失败");
     } finally {

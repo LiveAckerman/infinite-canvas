@@ -205,19 +205,14 @@ func StreamPipelineRunZip(userID string, id string, w io.Writer) error {
 	zw := zip.NewWriter(w)
 	defer zw.Close()
 
-	if err := addImageToZip(zw, run.SeedKey, "00_原图"); err != nil {
-		// seed 缺失不致命，继续打包后面的
-	}
-	for index, step := range run.Steps {
+	// 只打包产物，不含 seed（原图）。产物按顺序编号 1 / 2 / 3…（单条执行流程没有「主条」概念）。
+	productSeq := 0
+	for _, step := range run.Steps {
 		if step.OutputKey == "" {
 			continue
 		}
-		// step 序号从 1 开始
-		nameHint := fmt.Sprintf("%02d_%s", index+1, sanitizeForFilename(step.AgentNameSnap))
-		if step.Status == model.PipelineRunStepFailed {
-			nameHint += "_failed"
-		}
-		_ = addImageToZip(zw, step.OutputKey, nameHint)
+		productSeq++
+		_ = addImageToZip(zw, step.OutputKey, fmt.Sprintf("%d", productSeq))
 	}
 	return nil
 }

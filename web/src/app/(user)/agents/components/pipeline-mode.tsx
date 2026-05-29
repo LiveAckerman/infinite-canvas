@@ -9,9 +9,11 @@ import { useRouter } from "next/navigation";
 import { createId } from "@/lib/id";
 import { fetchMyPipelines, saveMyPipeline, deleteMyPipeline, type Pipeline, type PipelineListResponse } from "@/services/api/pipelines";
 import {
+  collectRunProductKeys,
   createMyPipelineRun,
   deleteMyPipelineRun,
   downloadPipelineRunZip,
+  downloadSingleImage,
   fetchMyPipelineRuns,
   saveMyPipelineRun,
   type PipelineRun,
@@ -303,7 +305,14 @@ export function PipelineMode({ agents }: Props) {
   const handleDownloadZip = async (run: PipelineRun) => {
     setDownloadingId(run.id);
     try {
-      await downloadPipelineRunZip(run.id, `${run.pipelineName || "pipeline-run"}-${run.id.slice(-6)}`);
+      const name = `${run.pipelineName || "pipeline-run"}-${run.id.slice(-6)}`;
+      const products = collectRunProductKeys(run);
+      // 只有一个产物：直接下原图，不打 zip。
+      if (products.length === 1) {
+        await downloadSingleImage(products[0], name);
+      } else {
+        await downloadPipelineRunZip(run.id, name);
+      }
     } catch (error) {
       message.error(error instanceof Error ? error.message : "下载失败");
     } finally {

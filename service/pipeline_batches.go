@@ -872,68 +872,31 @@ func StreamPipelineBatchZip(userID string, id string, w io.Writer) error {
 	zw := zip.NewWriter(w)
 	defer zw.Close()
 
-	// 主条：按 position asc（position 已是 0..N-1）。
-	// 全部平铺到 zip 根目录，靠文件名前缀区分（不嵌套文件夹）。
+	// 命名规则（全部平铺到 zip 根目录，不嵌套文件夹、不打包原图 seed / 后处理 sources）：
+	//   - 主条产物：{主条序号}.{该条内第几个产物}，如主条 1 的两个产物 → 1.1 / 1.2，只有一个 → 1.1
+	//   - 后处理产物：在主条数量之后顺序累加的整数。例如 6 个主条 → 后处理从 7 开始（7 / 8 …）。
 	for _, run := range detail.MainRuns {
-		runName := sanitizeForFilename(run.PipelineNameSnap)
-		prefix := fmt.Sprintf("%02d_main_%s", run.Position+1, runName)
-		if run.SeedKey != "" {
-			_ = addImageToZip(zw, run.SeedKey, prefix+"_00_seed")
-		}
-		for stepIndex, step := range run.Steps {
+		runOrder := run.Position + 1
+		productSeq := 0
+		for _, step := range run.Steps {
 			if step.OutputKey == "" {
-				continue
+				continue // 没产物的步骤（失败 / 未跑）跳过，不占编号
 			}
-			nameHint := fmt.Sprintf("%s_%02d_%s", prefix, stepIndex+1, sanitizeForFilename(step.AgentNameSnap))
-			if step.Status == model.PipelineRunStepFailed {
-				nameHint += "_failed"
-			}
-			_ = addImageToZip(zw, step.OutputKey, nameHint)
+			productSeq++
+			_ = addImageToZip(zw, step.OutputKey, fmt.Sprintf("%d.%d", runOrder, productSeq))
 		}
 	}
 
+	// 后处理段：编号紧接主条数量之后累加（按 run 数量算偏移，跟主条产物多少无关）。
 	if detail.Batch.PostEnabled && len(detail.PostRuns) > 0 {
-		postName := sanitizeForFilename(detail.Batch.PostName)
-		if postName == "" {
-			postName = "post"
-		}
-		postPrefix := fmt.Sprintf("post_%s", postName)
-		// sources：从第一个 post run 取（所有 post runs 共享同一份 sources）
-		runMap := map[string]model.PipelineRun{}
-		for _, r := range detail.MainRuns {
-			runMap[r.ID] = r
-		}
-		for srcIndex, src := range detail.PostRuns[0].SourceRefs {
-			sourceRun, ok := runMap[src.RunID]
-			if !ok {
-				continue
-			}
-			var key string
-			var label string
-			runOrder := sourceRun.Position + 1
-			if src.StepIndex == -1 {
-				key = sourceRun.SeedKey
-				label = fmt.Sprintf("%02d_from-run%02d-seed", srcIndex+1, runOrder)
-			} else if src.StepIndex >= 0 && src.StepIndex < len(sourceRun.Steps) {
-				key = sourceRun.Steps[src.StepIndex].OutputKey
-				label = fmt.Sprintf("%02d_from-run%02d-step%02d", srcIndex+1, runOrder, src.StepIndex+1)
-			}
-			if key == "" {
-				continue
-			}
-			_ = addImageToZip(zw, key, fmt.Sprintf("%s_source_%s", postPrefix, label))
-		}
-		// 各 post run 的产物平铺
-		for postIndex, run := range detail.PostRuns {
+		postNumber := len(detail.MainRuns)
+		for _, run := range detail.PostRuns {
 			for _, step := range run.Steps {
 				if step.OutputKey == "" {
 					continue
 				}
-				nameHint := fmt.Sprintf("%s_%02d_%s", postPrefix, postIndex+1, sanitizeForFilename(step.AgentNameSnap))
-				if step.Status == model.PipelineRunStepFailed {
-					nameHint += "_failed"
-				}
-				_ = addImageToZip(zw, step.OutputKey, nameHint)
+				postNumber++
+				_ = addImageToZip(zw, step.OutputKey, fmt.Sprintf("%d", postNumber))
 			}
 		}
 	}

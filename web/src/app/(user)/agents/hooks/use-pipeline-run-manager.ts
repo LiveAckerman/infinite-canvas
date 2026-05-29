@@ -12,6 +12,7 @@ import {
   type PipelineRun,
   type PipelineRunListResponse,
   type PipelineRunSourceRef,
+  type PipelineRunStatus,
   type PipelineRunStep,
 } from "@/services/api/pipeline-runs";
 import { useUserStore } from "@/stores/use-user-store";
@@ -76,6 +77,23 @@ function recoverStaleRun(run: PipelineRun): PipelineRun {
       };
     }),
   };
+}
+
+// 一条 run 是否还有「没干完的活」——存在 idle / running 的步骤才算。
+// failed 是已终结的失败、success 是已完成，都不算「还要跑」。
+// 用来区分「真孤儿（跑一半断了，要恢复重跑）」和「假 running（步骤其实全终结了，只是
+// 上次最后一次 persist 终态没落库，run.status 卡在 running）」。
+function runHasPendingWork(run: PipelineRun): boolean {
+  return run.steps.some((step) => step.status === "idle" || step.status === "running");
+}
+
+// 按各步骤的最终结果算 run 的终态，跟 runRun 收尾时的判定保持一致。
+function computeRunFinalStatus(run: PipelineRun): PipelineRunStatus {
+  const successCount = run.steps.filter((step) => step.status === "success").length;
+  const failedCount = run.steps.filter((step) => step.status === "failed").length;
+  if (failedCount === 0) return "success";
+  if (successCount === 0) return "failed";
+  return "partial";
 }
 
 type Props = {
@@ -171,7 +189,24 @@ export function usePipelineRunManager({ agents }: Props) {
       const updatedAt = run.updatedAt ? new Date(run.updatedAt).getTime() : 0;
       const stale = updatedAt > 0 && now - updatedAt > ORPHAN_THRESHOLD_MS;
       if (!owned && !stale) continue;
-      // 重置 step.status="running" 为 idle，runner 拉起来后从这些 idle 步骤继续跑。
+
+      // ★ 假 running 修复：如果这条 run 其实没有任何「没干完的活」（所有步骤都已 success / failed，
+      // 没有 idle / running 的步骤），说明它上次已经跑完了，只是最后一次 persist 终态的 PUT 没落库，
+      // run.status 卡在 running。这种**不要重跑**（重跑会把已完成的产物重新跑一遍、还可能因为
+      // 上游抖动失败），直接按步骤结果收敛成正确终态（全 success → success / 有失败 → partial / 全失败 → failed）。
+      if (!runHasPendingWork(run)) {
+        const finalized: PipelineRun = { ...run, status: computeRunFinalStatus(run) };
+        queryClient.setQueryData<PipelineRunListResponse>(RUNS_QUERY_KEY, (old) => {
+          if (!old) return old;
+          return { ...old, items: old.items.map((item) => (item.id === run.id ? finalized : item)) };
+        });
+        unmarkRunOwned(run.id);
+        // PUT 回后端（顺带触发 batch 状态机收敛）；失败也无所谓，UI 已经显示终态。
+        void saveMyPipelineRun(token, finalized).catch(() => {});
+        continue;
+      }
+
+      // 真孤儿：有 idle / running 步骤 → 重置 step.status="running" 为 idle，runner 拉起来从这些步骤继续跑。
       const recovered = recoverStaleRun(run);
       // 同步本地 cache 让 UI 立刻反应（pill 从「运行中」变「排队中」），avoid 闪烁
       queryClient.setQueryData<PipelineRunListResponse>(RUNS_QUERY_KEY, (old) => {
