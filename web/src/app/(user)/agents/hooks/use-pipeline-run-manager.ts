@@ -96,6 +96,16 @@ function computeRunFinalStatus(run: PipelineRun): PipelineRunStatus {
   return "partial";
 }
 
+// 单步重做 / 重试后用：如果 run 的步骤都已终结（没有 idle / running），重算并收敛 run.status；
+// 否则（还有步骤等调度器跑）保持原 status 不动，避免擅自把进行中的 run 标成终态。
+// 修复「detail 页重试某步成功后，run 仍停在 partial、批次外层一直显示部分完成」。
+function recomputeRunStatusIfSettled(run: PipelineRun): PipelineRun {
+  if (runHasPendingWork(run)) return run;
+  const next = computeRunFinalStatus(run);
+  if (next === run.status) return run;
+  return { ...run, status: next };
+}
+
 type Props = {
   // 当前用户角色库，用来调上游时找 agent.systemPrompt / referenceImageKeys / defaultSize 等
   agents: Agent[];
@@ -519,10 +529,21 @@ export function usePipelineRunManager({ agents }: Props) {
         lastRunSnapshot: { inputKey: inputKeys.join(","), extraNote: step.extraNote, inputSource },
       };
       applyStepPatchOptimistically(runId, stepIndex, successPatch);
-      // 拉最新缓存（已含用户可能在 invokeStep 期间改的附加说明 / 角色 / 覆盖图）PUT 回库
+      // 拉最新缓存（已含用户可能在 invokeStep 期间改的附加说明 / 角色 / 覆盖图）PUT 回库。
+      // ★ 关键：单步重做成功后，必须**重算 run 的整体状态**再 PUT，否则原来是 partial 的 run
+      // 即便所有步骤都补成 success 了，run.status 仍停在 partial，后端 UpdateBatchStatusAfterRunChange
+      // 读到 partial → 批次外层也一直显示「部分完成」。recomputeRunStatusIfSettled 在没有
+      // idle/running 步骤时按 success/failed 统计收敛终态。
       const latestForPersist = queryClient.getQueryData<PipelineRun>([...RUNS_QUERY_KEY, runId])
         || queryClient.getQueryData<PipelineRunListResponse>(RUNS_QUERY_KEY)?.items.find((item) => item.id === runId);
-      if (latestForPersist) void persistRun(latestForPersist);
+      if (latestForPersist) {
+        // 重算 run 整体状态后写两份 cache + PUT。persistRun 内部也会写 cache，
+        // 但它 merge 的是用户可编辑字段、不动 status，所以这里先把含新 status 的对象传进去。
+        const finalized = recomputeRunStatusIfSettled(latestForPersist);
+        queryClient.setQueryData<PipelineRunListResponse>(RUNS_QUERY_KEY, (old) => old ? { ...old, items: old.items.map((item) => (item.id === runId ? finalized : item)) } : old);
+        queryClient.setQueryData<PipelineRun>([...RUNS_QUERY_KEY, runId], finalized);
+        void persistRun(finalized);
+      }
     } catch (error) {
       const failedPatch: Partial<PipelineRunStep> = {
         status: "failed",
@@ -532,7 +553,7 @@ export function usePipelineRunManager({ agents }: Props) {
       applyStepPatchOptimistically(runId, stepIndex, failedPatch);
       const latestForPersist = queryClient.getQueryData<PipelineRun>([...RUNS_QUERY_KEY, runId])
         || queryClient.getQueryData<PipelineRunListResponse>(RUNS_QUERY_KEY)?.items.find((item) => item.id === runId);
-      if (latestForPersist) void persistRun(latestForPersist);
+      if (latestForPersist) void persistRun(recomputeRunStatusIfSettled(latestForPersist));
     }
   };
 

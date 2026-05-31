@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.0.37 - 2026-05-31
+
++ [修复] **批次详情页重试某步成功后，主条 run 仍停在「部分完成」、批次外层一直显示「部分完成」**：`runSingleStep`（detail 页单步重做 / 重试）跑完只改了那一步的 `status`，**没有重算 run 的整体状态**——原来是 `partial` 的 run 即便所有步骤都补成 `success`，run.status 仍停在 `partial`。后端 `aggregateMainFinalStatus` 把 `partial` 的 run 计为「失败」，于是批次外层一直「部分完成」。修复：单步重做 / 重试落库前用 `recomputeRunStatusIfSettled` 重算——run 没有 idle/running 步骤时按 success/failed 统计收敛终态（全 success → success），再 PUT；后端 `UpdateBatchStatusAfterRunChange` 读到正确的 run.status 后批次也跟着收敛成「全部完成」。
+
 ## v0.0.36 - 2026-05-29
 
 + [修复] **客户端断开后后端仍把图生图跑完并扣分（钱扣了图没拿到）**：线上排查 eecopt 用户「一直失败还扣分」，发现后端 `/api/v1/images/edits` 全部返回 200（耗时 40s~2min 都成功生成、扣分、写 consume 流水），但 nginx access.log 记了大量 `499`（客户端主动断开）——用户嫌生图慢，连点重做 / 刷新 / 切走，浏览器把还在跑的请求 abort 了。**而 Go 后端不感知客户端已断开，继续把上游图生图跑完、成功、扣分**，前端这边拿不到响应显示「请求失败」。结果：eecopt 扣了 27 分却 0 张成功产出。修复分两段把「客户端断开」一路传导到后端，触发退还预扣：
