@@ -269,7 +269,7 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
     if (!detail) return;
     modal.confirm({
       title: "删除批量任务",
-      content: `确定删除「${detail.batch.name || "未命名批次"}」吗？该批次下所有 main / post run 会一并被删，产物图本身保留在图床里。`,
+      content: `确定删除「${detail.batch.name || "未命名批次"}」吗？该批次下所有 main / post run 以及关联的图片资源（原图、各步产物）都会一并删除（仍被别处引用的图片会保留）。`,
       okText: "删除",
       okButtonProps: { danger: true, loading: deleteMutation.isPending },
       cancelText: "取消",

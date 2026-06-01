@@ -1,7 +1,7 @@
 package service
 
 import (
-	"errors"
+	"fmt"
 	"log"
 	"regexp"
 	"strings"
@@ -346,10 +346,12 @@ func CleanupImagesByKeysIfOrphan(userID string, keys []string) {
 }
 
 // UserImageQuotaBytes 单用户图片总占用上限，超出 SaveImage 时拒绝。
-// 普通用户 500MB，admin 不受限（在 SaveImage 里识别）。
-const UserImageQuotaBytes int64 = 500 * 1024 * 1024
+// 普通用户 2GB，admin 不受限（在 SaveImage 里识别）。
+// 磁盘 58G / 余 20G+，2GB/人 对当前用户量足够宽松；真不够再调这一个常量即可。
+const UserImageQuotaBytes int64 = 2 * 1024 * 1024 * 1024
 
-var errImageQuotaExceeded = errors.New("您的图片存储已达上限（500MB），请清理后再上传")
+// 错误文案跟着常量走，改上限不用再手改字符串（避免「常量改了文案还写 500MB」的不一致）。
+var errImageQuotaExceeded = fmt.Errorf("您的图片存储已达上限（%dGB），请清理一些图片后再上传", UserImageQuotaBytes/(1024*1024*1024))
 
 // userImageTotalBytes 返回单个用户当前已用图片总字节数。
 func userImageTotalBytes(userID string) (int64, error) {

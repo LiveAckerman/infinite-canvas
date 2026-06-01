@@ -294,7 +294,7 @@ export function PipelineMode({ agents }: Props) {
   const handleDeleteRun = (run: PipelineRun) => {
     modal.confirm({
       title: "删除执行流程",
-      content: `确定删除「${run.pipelineName}」这条执行流程吗？产物图本身不会被删（如果加入了素材库还在）。`,
+      content: `确定删除「${run.pipelineName}」这条执行流程吗？关联的图片资源（原图、各步产物）也会一并删除（仍被别处引用的，比如已加入素材库的，会保留）。`,
       okText: "删除",
       okButtonProps: { danger: true },
       cancelText: "取消",

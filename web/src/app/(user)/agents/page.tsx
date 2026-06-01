@@ -423,7 +423,7 @@ function AgentsWorkbench() {
   const handleDeleteBatch = (id: string, name: string) => {
     modal.confirm({
       title: "删除批量任务",
-      content: `确定删除「${name || "未命名批次"}」吗？该批次下所有 main / post run 会一并被删，产物图本身保留在图床里。`,
+      content: `确定删除「${name || "未命名批次"}」吗？该批次下所有 main / post run 以及关联的图片资源（原图、各步产物）都会一并删除（仍被别处引用的图片会保留）。`,
       okText: "删除",
       okButtonProps: { danger: true },
       cancelText: "取消",
@@ -615,7 +615,7 @@ function AgentsWorkbench() {
         okButtonProps={{ danger: true, loading: deleteMutation.isPending }}
         cancelText="取消"
       >
-        确定删除「{deletingAgent?.name}」吗？删除后历史调用记录里仍能看到这个名字，但角色卡片和工作区里不再展示。
+        确定删除「{deletingAgent?.name}」吗？删除后历史调用记录里仍能看到这个名字，但角色卡片和工作区里不再展示；角色头像、参考图等关联图片资源也会一并删除（仍被别处引用的会保留）。
       </Modal>
 
       <AgentRecordsDrawer

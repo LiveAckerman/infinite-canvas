@@ -133,7 +133,7 @@ function PipelineRunDetail({ runId }: { runId: string }) {
     if (!run) return;
     modal.confirm({
       title: "删除执行流程",
-      content: `确定删除「${run.pipelineName}」吗？删除后无法恢复（产物图本身在素材库里如果加过仍然在）。`,
+      content: `确定删除「${run.pipelineName}」吗？删除后无法恢复，关联的图片资源（原图、各步产物）也会一并删除（仍被别处引用的，比如已加入素材库的，会保留）。`,
       okText: "删除",
       okButtonProps: { danger: true, loading: deleteMutation.isPending },
       cancelText: "取消",

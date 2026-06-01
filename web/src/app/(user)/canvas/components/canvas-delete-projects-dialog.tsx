@@ -39,7 +39,7 @@ export function CanvasDeleteProjectsDialog() {
       onCancel={() => setDeleteIds([])}
       footer={<><Button onClick={() => setDeleteIds([])}>取消</Button><Button danger type="primary" onClick={() => void confirm()}>删除</Button></>}
     >
-      <p className="text-sm text-stone-500">将删除 {ids.length} 个画布，里面的节点和连线也会一起移除。</p>
+      <p className="text-sm text-stone-500">将删除 {ids.length} 个画布，里面的节点、连线以及关联的图片资源也会一并删除（仍被别处引用的图片会保留）。</p>
     </Modal>
   );
 }
