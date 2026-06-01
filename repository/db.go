@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,8 +62,48 @@ func DB() (*gorm.DB, error) {
 			&model.PipelineBatch{},
 			&model.PipelineBatchTemplate{},
 		)
+		if dbErr == nil {
+			backfillAgentWorkstationReferenceKeys(db)
+		}
 	})
 	return db, dbErr
+}
+
+// backfillAgentWorkstationReferenceKeys 把 agent_workstation_cards 的老单图列 reference_key
+// 迁进新的 JSON 数组列 reference_keys。一次性、幂等：只在 reference_keys 为空且老列非空时补。
+// 全新库没有 reference_key 列（SELECT 直接报错），捕获后跳过。新代码不再写 reference_key，
+// 所以补过一次后这条查询就再也命中不到了。
+func backfillAgentWorkstationReferenceKeys(db *gorm.DB) {
+	type legacyRow struct {
+		ID           string
+		ReferenceKey string
+	}
+	var rows []legacyRow
+	err := db.Table("agent_workstation_cards").
+		Where("reference_key IS NOT NULL AND reference_key <> ''").
+		Where("(reference_keys IS NULL OR reference_keys = '' OR reference_keys = 'null')").
+		Select("id, reference_key").
+		Scan(&rows).Error
+	if err != nil || len(rows) == 0 {
+		return // 老列不存在（全新库）/ 无需迁移
+	}
+	migrated := 0
+	for _, r := range rows {
+		keysJSON, e := json.Marshal([]string{r.ReferenceKey})
+		if e != nil {
+			continue
+		}
+		if e := db.Table("agent_workstation_cards").
+			Where("id = ?", r.ID).
+			Update("reference_keys", string(keysJSON)).Error; e != nil {
+			log.Printf("backfill workstation reference_keys %s failed: %v", r.ID, e)
+			continue
+		}
+		migrated++
+	}
+	if migrated > 0 {
+		log.Printf("backfilled %d agent_workstation_cards reference_key -> reference_keys", migrated)
+	}
 }
 
 func dialector(driver string, dsn string) gorm.Dialector {

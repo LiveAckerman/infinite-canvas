@@ -1,12 +1,13 @@
 "use client";
 
-import { ClipboardPaste, Image as ImageIcon, Plus, Trash2, Upload } from "lucide-react";
-import { App, AutoComplete, Button, Form, Image, Input, Modal, Select } from "antd";
-import { useEffect, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent } from "react";
+import { Upload } from "lucide-react";
+import { App, AutoComplete, Button, Form, Input, Modal, Select } from "antd";
+import { useEffect, useRef } from "react";
 
 import { useImageUploader } from "@/lib/use-image-uploader";
 import { imageUrl } from "@/services/image-storage";
 import { PromptImproveBar } from "@/components/prompt-improve-panel";
+import { ReferenceImagesField } from "@/components/reference-images-field";
 import type { Agent } from "@/services/api/agents";
 
 import { AgentAvatar } from "./agent-avatar";
@@ -40,13 +41,6 @@ export function AgentEditModal({ open, editing, onClose, onSubmit, submitting }:
   const [form] = Form.useForm<AgentFormValues>();
   const uploadWithToast = useImageUploader();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // 全局共用一个隐藏的参考图 file input：上一次点哪个槽位（添加 / 替换），就把
-  // index 存进 refSlotIndexRef，input 的 onChange 拿到 index 写回 form。
-  // 这样既避免渲染多份 input 露出原生「选择文件 未选择…」UI，也省得每个槽位重写一遍 ref。
-  const refFileInputRef = useRef<HTMLInputElement>(null);
-  const refSlotIndexRef = useRef<number>(-1);
-  // 拖拽 / 粘贴时给参考图区域加蓝色高亮；离开 / 松手清掉。
-  const [refDragHighlight, setRefDragHighlight] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -74,124 +68,6 @@ export function AgentEditModal({ open, editing, onClose, onSubmit, submitting }:
       form.setFieldValue("avatarUrl", imageUrl(result.storageKey));
     } catch {
       // useImageUploader 已经弹错误 toast
-    }
-  };
-
-  // 打开 file picker：传入 index，添加一张就用 current.length，替换某张就用对应 index。
-  const openReferencePicker = (index: number) => {
-    refSlotIndexRef.current = index;
-    refFileInputRef.current?.click();
-  };
-
-  // 设置 / 替换某个 index 上的参考图：
-  //   - index 等于现有长度时，等于「新增一张」追加
-  //   - index < 长度时，等于「替换那一张」
-  const handleReferenceSlot = async (index: number, file?: File | null) => {
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      message.error("请上传图片文件");
-      return;
-    }
-    const current: string[] = form.getFieldValue("referenceImageKeys") || [];
-    if (index >= MAX_REFERENCE_IMAGES) return;
-    try {
-      const result = await uploadWithToast(file, { label: "参考图" });
-      const next = [...current];
-      next[index] = result.storageKey;
-      // 去空 + 截断到上限，避免出现非连续空槽
-      form.setFieldValue("referenceImageKeys", next.filter(Boolean).slice(0, MAX_REFERENCE_IMAGES));
-    } catch {
-      // useImageUploader 已弹错误
-    }
-  };
-
-  const removeReference = (index: number) => {
-    const current: string[] = form.getFieldValue("referenceImageKeys") || [];
-    form.setFieldValue("referenceImageKeys", current.filter((_, idx) => idx !== index));
-  };
-
-  // 批量追加：拖入 / 粘贴可能同时给多张图，按顺序填到剩余槽位（超过最大数的丢弃 + toast 提示）。
-  // 单张失败只跳过那一张，跟 /image 工作台的 addReferencesFromBlobs 一致。
-  const appendReferenceFiles = async (files: File[]) => {
-    const images = files.filter((file) => file.type.startsWith("image/"));
-    if (!images.length) {
-      if (files.length) message.error("不是图片，已忽略");
-      return;
-    }
-    const current: string[] = form.getFieldValue("referenceImageKeys") || [];
-    const remain = Math.max(0, MAX_REFERENCE_IMAGES - current.length);
-    if (remain <= 0) {
-      message.error(`参考图最多 ${MAX_REFERENCE_IMAGES} 张`);
-      return;
-    }
-    if (images.length > remain) {
-      message.warning(`只追加 ${remain} 张，剩余 ${images.length - remain} 张超过上限被丢弃`);
-    }
-    const toUpload = images.slice(0, remain);
-    const uploaded = await Promise.all(toUpload.map(async (file) => {
-      try {
-        const result = await uploadWithToast(file, { label: "参考图" });
-        return result.storageKey;
-      } catch {
-        return null;
-      }
-    }));
-    const additions = uploaded.filter((key): key is string => Boolean(key));
-    if (additions.length) {
-      form.setFieldValue("referenceImageKeys", [...current, ...additions].slice(0, MAX_REFERENCE_IMAGES));
-    }
-  };
-
-  // 拖入：只有 dataTransfer.types 含 "Files" 才高亮，避免文本拖动也变蓝。
-  const handleRefDragOver = (event: ReactDragEvent<HTMLDivElement>) => {
-    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
-    setRefDragHighlight(true);
-  };
-  const handleRefDragLeave = (event: ReactDragEvent<HTMLDivElement>) => {
-    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
-    setRefDragHighlight(false);
-  };
-  const handleRefDrop = (event: ReactDragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    setRefDragHighlight(false);
-    const files = Array.from(event.dataTransfer.files || []);
-    void appendReferenceFiles(files);
-  };
-
-  // 在参考图区域里 Ctrl/Cmd+V 粘贴：拦截 clipboardData.items 里的图片项，
-  // 不阻止其它内容的默认粘贴行为，只在出现图片时 preventDefault。
-  const handleRefPaste = (event: ReactClipboardEvent<HTMLDivElement>) => {
-    const items = Array.from(event.clipboardData?.items || []);
-    const files = items
-      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => file !== null);
-    if (!files.length) return;
-    event.preventDefault();
-    void appendReferenceFiles(files);
-  };
-
-  // 「读取剪切板」按钮：用 Clipboard API（要 HTTPS / localhost），跟 /image 工作台一致。
-  const handleRefClipboardButton = async () => {
-    try {
-      const items = await navigator.clipboard.read();
-      const blobs: File[] = [];
-      for (const item of items) {
-        for (const type of item.types) {
-          if (!type.startsWith("image/")) continue;
-          const blob = await item.getType(type);
-          blobs.push(new File([blob], `clipboard-${Date.now()}-${blobs.length}.png`, { type }));
-        }
-      }
-      if (!blobs.length) {
-        message.error("剪切板里没有可读取的图片");
-        return;
-      }
-      await appendReferenceFiles(blobs);
-    } catch {
-      message.error("剪切板里没有可读取的图片");
     }
   };
 
@@ -264,88 +140,20 @@ export function AgentEditModal({ open, editing, onClose, onSubmit, submitting }:
           disabled={submitting}
         />
         <Form.Item
-          label={(
-            <div className="flex w-full items-center justify-between gap-3">
-              <span>参考图（可选，最多 {MAX_REFERENCE_IMAGES} 张）</span>
-              <Button
-                size="small"
-                icon={<ClipboardPaste className="size-3.5" />}
-                onClick={() => void handleRefClipboardButton()}
-                disabled={watchedReferenceKeys.length >= MAX_REFERENCE_IMAGES}
-              >
-                读取剪切板
-              </Button>
-            </div>
-          )}
+          label={`参考图（可选，最多 ${MAX_REFERENCE_IMAGES} 张）`}
           extra="不传也可以；如果加了，每次该角色生图都会和你在工作台上传的图一起作为参考。常用于「按这种风格 / 构图来」类的角色。支持拖入 / 粘贴 / 剪切板 / 点击四种方式，可一次加多张。"
         >
-          {/* 整个参考图区域包一层 drop / paste 容器：拖入 / Ctrl-V 都能批量追加 */}
-          <div
-            tabIndex={0}
-            onPaste={handleRefPaste}
-            onDragOver={handleRefDragOver}
-            onDragLeave={handleRefDragLeave}
-            onDrop={handleRefDrop}
-            className={`relative flex flex-wrap items-start gap-3 rounded-md p-2 transition-colors ${refDragHighlight ? "bg-blue-50/60 outline outline-2 outline-blue-400 dark:bg-blue-500/10 dark:outline-blue-500" : ""}`}
-          >
-            {watchedReferenceKeys.map((key, index) => (
-              <div key={`${index}-${key}`} className="group relative size-[104px] overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
-                <Image
-                  src={imageUrl(key)}
-                  alt={`参考图 ${index + 1}`}
-                  width={104}
-                  height={104}
-                  className="!size-[104px] object-cover"
-                  preview={{ mask: "查看" }}
-                />
-                <div className="absolute inset-x-0 bottom-0 hidden items-center justify-end gap-1 bg-gradient-to-t from-black/70 to-transparent p-1.5 group-hover:flex">
-                  <Button size="small" icon={<Upload className="size-3" />} onClick={() => openReferencePicker(index)}>换</Button>
-                  <Button size="small" type="primary" danger icon={<Trash2 className="size-3" />} onClick={() => removeReference(index)}>删</Button>
-                </div>
-              </div>
-            ))}
-            {watchedReferenceKeys.length < MAX_REFERENCE_IMAGES ? (
-              <button
-                type="button"
-                onClick={() => openReferencePicker(watchedReferenceKeys.length)}
-                className="grid size-[104px] place-items-center rounded-md border border-dashed border-stone-300 bg-stone-50 text-stone-500 transition hover:border-blue-400 hover:text-blue-500 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-400"
-              >
-                <div className="flex flex-col items-center gap-1">
-                  <Plus className="size-5" />
-                  <span className="text-xs">添加参考图</span>
-                </div>
-              </button>
-            ) : null}
-            {watchedReferenceKeys.length === 0 ? (
-              <div className="flex h-[104px] items-center text-xs text-stone-500 dark:text-stone-400">
-                <ImageIcon className="mr-1 size-3.5" />
-                <span>{refDragHighlight ? "松开以添加参考图" : "没有参考图也能生成，调用时只走你在工作台上传的图"}</span>
-              </div>
-            ) : null}
-            {refDragHighlight && watchedReferenceKeys.length > 0 ? (
-              <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-md bg-blue-500/5 text-sm font-medium text-blue-600 dark:text-blue-300">
-                松开以添加参考图
-              </div>
-            ) : null}
-          </div>
+          <ReferenceImagesField
+            value={watchedReferenceKeys}
+            onChange={(keys) => form.setFieldValue("referenceImageKeys", keys)}
+            max={MAX_REFERENCE_IMAGES}
+            title={null}
+            emptyText="没有参考图也能生成，调用时只走你在工作台上传的图"
+          />
         </Form.Item>
         <Form.Item name="referenceImageKeys" hidden>
           <Input />
         </Form.Item>
-        <input
-          ref={refFileInputRef}
-          type="file"
-          accept="image/*"
-          style={{ display: "none" }}
-          tabIndex={-1}
-          aria-hidden
-          onChange={(event) => {
-            const index = refSlotIndexRef.current;
-            refSlotIndexRef.current = -1;
-            if (index >= 0) void handleReferenceSlot(index, event.target.files?.[0]);
-            event.target.value = "";
-          }}
-        />
         <div className="grid grid-cols-2 gap-3">
           <Form.Item name="defaultSize" label="默认尺寸">
             <AutoComplete options={sizeOptions} placeholder="auto" />

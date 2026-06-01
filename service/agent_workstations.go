@@ -13,6 +13,8 @@ const (
 	// 卡片的「附加说明」沿用 agent.system_prompt 的上限，避免出现「角色提示词都能写 4000 字，
 	// 但卡片说明 80 字就截断」这种不直观情形。
 	agentWorkstationCardMaxExtraNoteLen = 4000
+	// 用户原图上限，跟模型 /v1/images/edits 的 editsJSONReferenceLimit 对齐。
+	agentWorkstationCardMaxReferences = 9
 )
 
 // ListMyAgentWorkstationCards 当前用户的工作区所有卡片。
@@ -28,7 +30,7 @@ func ListMyAgentWorkstationCards(userID string) (model.AgentWorkstationCardList,
 }
 
 // SaveMyAgentWorkstationCard upsert 卡片，按 (user_id, agent_id) 唯一。
-// 校验：必须传 AgentID，且这个角色属于当前用户；ReferenceKey / OutputKey 如果非空必须是当前用户的图片。
+// 校验：必须传 AgentID，且这个角色属于当前用户；ReferenceKeys（每张）/ OutputKey 如果非空必须是当前用户的图片。
 // 「加入工作区」「上传原图」「写附加说明」「跑完成功」「跑完失败」「重置」都共用这一个接口。
 func SaveMyAgentWorkstationCard(userID string, item model.AgentWorkstationCard) (model.AgentWorkstationCard, error) {
 	if userID == "" {
@@ -46,14 +48,26 @@ func SaveMyAgentWorkstationCard(userID string, item model.AgentWorkstationCard) 
 	if !ok || agent.UserID != userID {
 		return item, errors.New("角色不存在")
 	}
-	item.ReferenceKey = strings.TrimSpace(item.ReferenceKey)
+	// 原图：去首尾空白 + 去空，截断到上限，逐张校验归属。
+	cleanedRefs := make([]string, 0, len(item.ReferenceKeys))
+	for _, k := range item.ReferenceKeys {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		cleanedRefs = append(cleanedRefs, k)
+	}
+	if len(cleanedRefs) > agentWorkstationCardMaxReferences {
+		return item, errors.New("原图最多 9 张")
+	}
+	item.ReferenceKeys = cleanedRefs
 	item.OutputKey = strings.TrimSpace(item.OutputKey)
 	item.ExtraNote = strings.TrimSpace(item.ExtraNote)
 	if len([]rune(item.ExtraNote)) > agentWorkstationCardMaxExtraNoteLen {
 		return item, errors.New("附加说明最多 4000 字")
 	}
-	if item.ReferenceKey != "" {
-		if _, err := GetImageForOwner(userID, item.ReferenceKey); err != nil {
+	for _, k := range item.ReferenceKeys {
+		if _, err := GetImageForOwner(userID, k); err != nil {
 			return item, errors.New("原图无权访问或不存在")
 		}
 	}
@@ -108,9 +122,11 @@ func DeleteMyAgentWorkstationCard(userID string, id string) error {
 	if err := repository.DeleteAgentWorkstationCard(id); err != nil {
 		return err
 	}
-	keys := make([]string, 0, 2)
-	if saved.ReferenceKey != "" {
-		keys = append(keys, saved.ReferenceKey)
+	keys := make([]string, 0, len(saved.ReferenceKeys)+1)
+	for _, k := range saved.ReferenceKeys {
+		if k != "" {
+			keys = append(keys, k)
+		}
 	}
 	if saved.OutputKey != "" {
 		keys = append(keys, saved.OutputKey)

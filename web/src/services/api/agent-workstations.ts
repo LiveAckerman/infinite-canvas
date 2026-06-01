@@ -8,7 +8,7 @@ export type AgentWorkstationCard = {
   userId: string;
   agentId: string;
   position: number;
-  referenceKey?: string;
+  referenceKeys?: string[];
   extraNote?: string;
   outputKey?: string;
   status: AgentWorkstationCardStatus;

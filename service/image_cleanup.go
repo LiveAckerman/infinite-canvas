@@ -65,7 +65,7 @@ func walkJSONForImageKeys(value any, set map[string]bool) {
 //   - assets.cover_url / url
 //   - prompts.cover_url
 //   - agents.avatar_url / reference_image_keys
-//   - agent_workstation_cards.reference_key / output_key
+//   - agent_workstation_cards.reference_keys / output_key
 //   - pipeline_runs.seed_key / steps[].output_key / manual_override_key / last_run_snapshot.input_key
 func CollectInUseImageKeys() (map[string]bool, error) {
 	db, err := repository.DB()
@@ -141,8 +141,10 @@ func CollectInUseImageKeys() (map[string]bool, error) {
 		return nil, err
 	}
 	for _, c := range cards {
-		if c.ReferenceKey != "" {
-			inUse[c.ReferenceKey] = true
+		for _, k := range c.ReferenceKeys {
+			if k != "" {
+				inUse[k] = true
+			}
 		}
 		if c.OutputKey != "" {
 			inUse[c.OutputKey] = true

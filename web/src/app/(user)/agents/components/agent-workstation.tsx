@@ -1,14 +1,13 @@
 "use client";
 
-import { ChevronDown, ChevronUp, ClipboardPaste, Download, FolderPlus, ImagePlus, LoaderCircle, RotateCw, Sparkles, Upload, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Download, FolderPlus, LoaderCircle, RotateCw, Sparkles, X } from "lucide-react";
 import { App, Button, Image, Input, Tag } from "antd";
-import { useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { defaultConfig } from "@/lib/ai-config";
-import { createId } from "@/lib/id";
 import { formatDuration, readImageMeta } from "@/lib/image-utils";
-import { useImageUploader } from "@/lib/use-image-uploader";
 import { PromptImproveBar } from "@/components/prompt-improve-panel";
+import { ReferenceImagesField } from "@/components/reference-images-field";
 import type { AgentWorkstationCard } from "@/services/api/agent-workstations";
 import { saveGeneration } from "@/services/api/generations";
 import { requestEdit, requestGeneration, type GeneratedImage as GeneratedImagePayload } from "@/services/api/image";
@@ -31,10 +30,10 @@ type WorkstationResult = {
   durationMs: number;
 };
 
-// 父层 PUT 写回数据库的 patch payload。referenceKey / outputKey / errorMessage 用空串显式清空。
+// 父层 PUT 写回数据库的 patch payload。referenceKeys 传空数组显式清空，outputKey / errorMessage 用空串。
 // status: 'running' 不入库（页面挂掉后没法续跑，恢复时全部按 idle）。
 export type WorkstationCardPatch = {
-  referenceKey?: string;
+  referenceKeys?: string[];
   extraNote?: string;
   outputKey?: string;
   status?: "idle" | "success" | "failed";
@@ -65,20 +64,9 @@ type AgentWorkstationProps = {
 export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGenerationSaved, initialCard, onPersistCard }: AgentWorkstationProps) {
   const { message } = App.useApp();
   const token = useUserStore((state) => state.token);
-  const uploadWithToast = useImageUploader();
-  const fileInputRef = useRef<HTMLInputElement>(null);
   // mount 时从 initialCard hydrate 各内部状态。后续直接走本地 setState + onPersistCard，
   // 不再监听 initialCard 的变化（避免父层缓存刷新触发的 hydrate 把用户当前输入回滚）。
-  const [reference, setReference] = useState<ReferenceImage | null>(() => {
-    if (!initialCard?.referenceKey) return null;
-    return {
-      id: `restored-ref-${initialCard.referenceKey}`,
-      name: "原图",
-      type: "image/*",
-      dataUrl: imageUrl(initialCard.referenceKey),
-      storageKey: initialCard.referenceKey,
-    };
-  });
+  const [referenceKeys, setReferenceKeys] = useState<string[]>(() => initialCard?.referenceKeys?.filter(Boolean) || []);
   const [extraNote, setExtraNote] = useState(initialCard?.extraNote || "");
   // server 端的 running 不入库，恢复时全部按 idle 渲染
   const [status, setStatus] = useState<WorkstationStatus>(
@@ -98,7 +86,6 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
       durationMs: initialCard.durationMs || 0,
     };
   });
-  const [dragHighlight, setDragHighlight] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
   const startedAtRef = useRef(0);
   // extraNote 防抖 PUT 计时器
@@ -141,71 +128,11 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
     }, 800);
   };
 
-  const handleFilePick = async (file?: File | null) => {
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      message.error("请选择图片文件");
-      return;
-    }
-    try {
-      const stored = await uploadWithToast(file, { label: "原图" });
-      setReference({ id: createId(), name: file.name, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey });
-      onPersistCard?.({ referenceKey: stored.storageKey });
-    } catch {
-      // useImageUploader 已经弹错误
-    }
-  };
-
-  // 用户点 X 移除当前原图：本地清掉 + 后端把 referenceKey 清空。
-  const handleRemoveReference = () => {
-    setReference(null);
-    onPersistCard?.({ referenceKey: "" });
-  };
-
-  const handlePaste = (event: ReactClipboardEvent<HTMLDivElement>) => {
-    const items = Array.from(event.clipboardData?.items || []);
-    const file = items.find((item) => item.kind === "file" && item.type.startsWith("image/"))?.getAsFile();
-    if (!file) return;
-    event.preventDefault();
-    void handleFilePick(file);
-  };
-
-  const handlePasteFromClipboard = async () => {
-    try {
-      const items = await navigator.clipboard.read();
-      for (const item of items) {
-        const imageType = item.types.find((type) => type.startsWith("image/"));
-        if (!imageType) continue;
-        const blob = await item.getType(imageType);
-        const file = new File([blob], `clipboard-${Date.now()}.png`, { type: imageType });
-        await handleFilePick(file);
-        return;
-      }
-      message.error("剪切板里没有可读取的图片");
-    } catch {
-      message.error("剪切板里没有可读取的图片");
-    }
-  };
-
-  const handleDragOver = (event: ReactDragEvent<HTMLDivElement>) => {
-    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
-    setDragHighlight(true);
-  };
-  const handleDragLeave = (event: ReactDragEvent<HTMLDivElement>) => {
-    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
-    setDragHighlight(false);
-  };
-  const handleDrop = (event: ReactDragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    setDragHighlight(false);
-    const file = Array.from(event.dataTransfer.files || []).find((item) => item.type.startsWith("image/"));
-    if (!file) {
-      if (event.dataTransfer.files?.length) message.error("拖入的不是图片，已忽略");
-      return;
-    }
-    void handleFilePick(file);
+  // 原图列表变化（上传 / 剪切板 / 粘贴 / 拖拽 / 换 / 删都由 ReferenceImagesField 统一处理后回调）：
+  // 本地立即更新 + 把整组 storageKey PUT 回卡片，跨设备能恢复。
+  const handleReferenceKeysChange = (keys: string[]) => {
+    setReferenceKeys(keys);
+    onPersistCard?.({ referenceKeys: keys });
   };
 
   const composedPrompt = useMemo(() => {
@@ -233,24 +160,27 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
       quality: agent.defaultQuality || defaultConfig.quality,
       count: "1",
     };
-    // 把「角色绑定的所有参考图（最多 3 张）」和「用户当前上传的原图」拼成 references 一起发到模型。
+    // 把「角色绑定的固定参考图（最多 3 张）」和「用户在卡片上传的原图（最多 9 张）」拼成 references 一起发给模型。
     // 角色参考图按设置顺序排在前（先验风格 / 构图参考），用户原图在后（要被处理的目标）。
+    // 模型 /v1/images/edits 上限 9 张，相加超过时按「先角色后用户」截断并提示。
     // 任一非空就走 /v1/images/edits；两者都空才回落到纯文生图 /generations。
-    const references: ReferenceImage[] = [];
-    for (const key of agent.referenceImageKeys || []) {
-      if (!key) continue;
-      references.push({
-        id: `agent-ref-${agent.id}-${key}`,
-        name: `${agent.name}-参考图`,
-        type: "image/*",
-        dataUrl: imageUrl(key),
-        storageKey: key,
-      });
+    const MAX_EDIT_REFERENCES = 9;
+    const agentRefKeys = (agent.referenceImageKeys || []).filter(Boolean);
+    let combinedKeys = [...agentRefKeys, ...referenceKeys.filter(Boolean)];
+    if (combinedKeys.length > MAX_EDIT_REFERENCES) {
+      message.warning(`参考图最多 ${MAX_EDIT_REFERENCES} 张（含角色固定参考图），已自动取前 ${MAX_EDIT_REFERENCES} 张`);
+      combinedKeys = combinedKeys.slice(0, MAX_EDIT_REFERENCES);
     }
-    if (reference) references.push(reference);
+    const references: ReferenceImage[] = combinedKeys.map((key, index) => ({
+      id: `ref-${agent.id}-${index}-${key}`,
+      name: index < agentRefKeys.length ? `${agent.name}-参考图` : "原图",
+      type: "image/*",
+      dataUrl: imageUrl(key),
+      storageKey: key,
+    }));
 
     const mode = references.length ? "edit" : "image";
-    const referenceKeys = references.map((ref) => ref.storageKey || "").filter(Boolean);
+    const referenceStorageKeys = combinedKeys;
     const requestParams: Record<string, unknown> = {
       mode,
       n: 1,
@@ -307,7 +237,7 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
         durationMs,
         status: "success",
         thumbnails: stored.storageKey ? [stored.storageKey] : [],
-        references: referenceKeys,
+        references: referenceStorageKeys,
         errors: [],
         requestParams,
         upstreamMeta: res.upstreamMeta || "",
@@ -339,7 +269,7 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
         durationMs: performance.now() - startedAtRef.current,
         status: "failed",
         thumbnails: [],
-        references: referenceKeys,
+        references: referenceStorageKeys,
         errors: [msg],
         requestParams,
         upstreamMeta: "",
@@ -427,9 +357,9 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
       </div>
       {/* 状态行：折叠时左侧补一张产物 / 原图小缩略图，让收起后也能一眼看到这张卡的成果。 */}
       <div className="flex items-center justify-between gap-2">
-        {collapsed && (result?.url || reference?.dataUrl) ? (
+        {collapsed && (result?.url || referenceKeys[0]) ? (
           <img
-            src={result?.url || reference?.dataUrl}
+            src={result?.url || imageUrl(referenceKeys[0])}
             alt=""
             className="size-8 shrink-0 rounded border border-stone-200 object-cover dark:border-stone-800"
           />
@@ -456,49 +386,18 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
         </div>
       ) : null}
 
-      <div
-        className={`relative flex min-h-32 flex-col items-center justify-center rounded-lg border-2 border-dashed p-3 text-center transition-colors ${dragHighlight ? "border-blue-500 bg-blue-50/40 dark:border-blue-400 dark:bg-blue-500/10" : "border-stone-300 dark:border-stone-700"}`}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-        onPaste={handlePaste}
-      >
-        {reference ? (
-          <div className="relative size-full">
-            <img src={reference.dataUrl} alt={reference.name} className="mx-auto max-h-40 rounded-md object-contain" />
-            <button
-              type="button"
-              className="absolute right-1 top-1 grid size-6 place-items-center rounded bg-black/60 text-white hover:bg-black/80"
-              onClick={handleRemoveReference}
-              aria-label="移除原图"
-            >
-              <X className="size-3.5" />
-            </button>
-          </div>
-        ) : (
-          <>
-            <ImagePlus className="mb-2 size-8 text-stone-400" />
-            <div className="text-xs text-stone-500 dark:text-stone-400">{dragHighlight ? "松开以添加原图" : "拖入 / 粘贴 / 点击上传原图"}</div>
-            <div className="mt-2 flex gap-2">
-              <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>上传</Button>
-              <Button size="small" icon={<ClipboardPaste className="size-3.5" />} onClick={() => void handlePasteFromClipboard()}>剪切板</Button>
-            </div>
-            <span className="mt-2 text-[11px] text-stone-400">{agent.referenceImageKeys?.length ? "未上传时按角色参考图生图" : "未上传也可生成（纯生图）"}</span>
-          </>
-        )}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          style={{ display: "none" }}
-          tabIndex={-1}
-          aria-hidden
-          onChange={(event) => {
-            void handleFilePick(event.target.files?.[0]);
-            event.target.value = "";
-          }}
-        />
-      </div>
+      {/* 原图上传：复用公共 ReferenceImagesField，支持上传 / 剪切板 / 粘贴 / 拖拽，最多 9 张。
+          一张不传也行——有角色固定参考图时按参考图生图，否则纯文生图。 */}
+      <ReferenceImagesField
+        value={referenceKeys}
+        onChange={handleReferenceKeysChange}
+        max={9}
+        label="原图"
+        disabled={status === "running"}
+        thumbSize={84}
+        title="原图（最多 9 张，可不传）"
+        emptyText={agent.referenceImageKeys?.length ? "未上传时按角色参考图生图" : "拖入 / 粘贴 / 点击上传，未上传也可纯生图"}
+      />
 
       <Input.TextArea
         value={extraNote}
