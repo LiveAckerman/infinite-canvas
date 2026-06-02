@@ -42,6 +42,12 @@ func New() *gin.Engine {
 	})
 	me.GET("/generations", gin.WrapF(handler.MyGenerations))
 	me.POST("/generations", gin.WrapF(handler.SaveMyGeneration))
+	// 后端任务化生图：run 发起、retry 重试失败槽（id 走 body，避开 /:id 与 run 的静态/通配冲突）、:id 轮询进度。
+	me.POST("/generations/run", gin.WrapF(handler.RunMyGeneration))
+	me.POST("/generations/retry", gin.WrapF(handler.RetryMyGeneration))
+	me.GET("/generations/:id", func(c *gin.Context) {
+		handler.GetMyGeneration(c.Writer, c.Request, c.Param("id"))
+	})
 	me.DELETE("/generations/:id", func(c *gin.Context) {
 		handler.DeleteMyGeneration(c.Writer, c.Request, c.Param("id"))
 	})

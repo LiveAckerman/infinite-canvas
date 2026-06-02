@@ -19,5 +19,7 @@ func main() {
 	if err := service.EnsureDefaultAdmin(); err != nil {
 		log.Fatal(err)
 	}
+	// 把上次没跑完的后端生图任务接着跑（服务重启 / 崩溃后恢复）；旧的遗留 running 记录顺手收敛终态。
+	service.ResumeRunningGenerations()
 	log.Fatal(router.New().Run(":" + config.Cfg.Port))
 }

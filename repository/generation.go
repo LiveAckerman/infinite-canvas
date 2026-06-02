@@ -55,6 +55,27 @@ func ListGenerations(userID string, q model.Query) ([]model.Generation, int64, e
 	return items, total, err
 }
 
+// ListRunningGenerations 列出所有处于 running 状态的生图记录（启动时恢复后台任务用）。
+func ListRunningGenerations() ([]model.Generation, error) {
+	db, err := DB()
+	if err != nil {
+		return nil, err
+	}
+	var items []model.Generation
+	err = db.Where("status = ?", string(model.GenerationStatusRunning)).Find(&items).Error
+	return items, err
+}
+
+// CountUserGenerationsByStatus 统计某用户处于指定状态的生图记录数（限制同时进行的任务数用）。
+func CountUserGenerationsByStatus(userID string, status string) (int64, error) {
+	db, err := DB()
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	return total, db.Model(&model.Generation{}).Where("user_id = ? AND status = ?", userID, status).Count(&total).Error
+}
+
 // SaveGeneration 新建或更新一条生图历史。
 func SaveGeneration(item model.Generation) (model.Generation, error) {
 	db, err := DB()

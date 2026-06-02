@@ -7,7 +7,9 @@ import (
 	"github.com/basketikun/infinite-canvas/repository"
 )
 
-const generationThumbnailLimit = 6
+// 一条生成记录最多保留多少张产物缩略图。后端任务化生图单次最多 ~10 张、再叠加「二次生成累加」，
+// 取一个宽松上限，避免 service.SaveGeneration 把多张产物截断丢失（删除产物时也走这里）。
+const generationThumbnailLimit = 24
 
 func ListGenerations(userID string, q model.Query) (model.GenerationList, error) {
 	items, total, err := repository.ListGenerations(userID, q)

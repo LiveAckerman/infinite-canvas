@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v0.0.42 - 2026-06-02
+
++ [重构] **生图工作台改成后端任务驱动 + 前端轮询（生成不再因刷新 / 切走而丢失）**：以前 `/image` 是浏览器逐张调接口、自己存盘、跑完才 upsert 记录——一刷新 / 切到别的记录，正在生成的这条就丢了，loading 中的槽还会变成「重试」。现在：
+  - 点「开始生成」→ 后端 `POST /api/generations/run` 立刻建一条 `running` 记录并起**后台 goroutine** 把每张跑完、`SaveImage` 落盘、增量写回记录；前端拿到记录后只**轮询**（列表 2s）刷新进度。刷新 / 切走 / 换设备 / 关页面都不影响——回来继续轮询直到终态。**服务重启**也会在启动 `ResumeRunningGenerations` 把没跑完的任务接着跑（旧的客户端遗留 running 记录顺手收敛终态，不再永久转圈）。
+  - 一条记录即一个任务：`待跑 = count - 成功(thumbnails) - 失败(errors)`。「二次生成累加」= `count += n`；「重试失败槽」= `POST /api/generations/retry` 删一条 error 让后台补跑；微调走 `parentId` 新建。worker 单锁防并发写 race、全局信号量限上游并发、按槽并行。
+  - **扣费改成「按出图张数扣」**：每槽先 `ConsumeCredits(1)`，该槽失败 / 额度不足则退还 / 跳过；任务收敛写一条消耗流水，顶栏积分在任务完成后自动刷新。
+  - 新接口：`POST /api/generations/run`、`GET /api/generations/:id`、`POST /api/generations/retry`。`generationThumbnailLimit` 6→24（容纳多张产物 + 累加，避免删除时被截断）。
+  - 范围：仅 `/image`；画布、角色工作台的生图仍走原 client 驱动 proxy，行为不变。
+
 ## v0.0.41 - 2026-06-02
 
 + [新增] **图片上传前自动压缩 + 5MB 硬上限兜底**：之前用户传手机拍的 4-12MB 大图，多张参考图打包后撞上游 cpa-manager 的 32MB multipart 限制（`{"code":"request_failed","error":"request body exceeds 33554432-byte limit"}`），生图直接失败。现在 `useImageUploader` 入口加一层 `browser-image-compression`：① 所有上传（角色头像 / 角色参考图 / 工作台参考图 / 素材封面 / 画布原图 / 助手图）自动压缩到「长边 ≤ 2048px + 体积 ≤ 2MB」，PNG 透明保留 PNG、其它转 JPEG q=0.85，走 WebWorker 不阻塞 UI；② 压缩后仍 > 5MB（极少见）直接拒绝并提示「请手动减小尺寸 / 拆分后再上传」；③ 上传过程 toast 文案从「正在上传」拆成「正在处理图片… → 正在上传…」让用户感知到压缩耗时（通常 0.3-1.5s）。压缩失败时兜底用原图，不影响正常流程。极少需要原图精度的场景可以传 `skipCompress: true` 跳过（暂未在 UI 暴露）。

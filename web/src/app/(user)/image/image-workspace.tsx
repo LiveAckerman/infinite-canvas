@@ -22,13 +22,13 @@ import { PromptImproveBar } from "@/components/prompt-improve-panel";
 import { AssetPickerModal, type InsertAssetPayload } from "@/app/(user)/canvas/components/asset-picker-modal";
 import type { AiConfig } from "@/lib/ai-config";
 import { createId } from "@/lib/id";
-import { formatBytes, formatDuration, getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
-import { requestEdit, requestGeneration } from "@/services/api/image";
-import { resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { formatBytes, formatDuration, readImageMeta } from "@/lib/image-utils";
+import { resolveImageUrl } from "@/services/image-storage";
 import { useImageUploader } from "@/lib/use-image-uploader";
-import { deleteGeneration, fetchGenerations, saveGeneration, type GenerationListResponse, type GenerationRecord } from "@/services/api/generations";
+import { deleteGeneration, fetchGenerations, retryGeneration, runGeneration, saveGeneration, type GenerationListResponse, type GenerationRecord } from "@/services/api/generations";
 import { saveMyAsset } from "@/services/api/my-assets";
 import { useAiConfigStore } from "@/stores/use-ai-config-store";
+import { fetchCurrentUser } from "@/services/api/auth";
 import { useUserStore } from "@/stores/use-user-store";
 import type { ReferenceImage } from "@/types/image";
 
@@ -71,11 +71,13 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
   const config = useAiConfigStore((state) => state.config);
   const updateConfig = useAiConfigStore((state) => state.updateConfig);
   const token = useUserStore((state) => state.token);
+  const setCredits = useUserStore((state) => state.setCredits);
   const uploadWithToast = useImageUploader();
   const [prompt, setPrompt] = useState("");
   const [references, setReferences] = useState<ReferenceImage[]>([]);
   const [results, setResults] = useState<GenerationResult[]>([]);
-  const [running, setRunning] = useState(false);
+  // submitting = 正在发起 /run 请求（很短）；真正的「生成中」由记录 status 决定（见下面派生的 running）。
+  const [submitting, setSubmitting] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [promptDialogOpen, setPromptDialogOpen] = useState(false);
@@ -84,6 +86,9 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [selectedLogIds, setSelectedLogIds] = useState<string[]>([]);
   const [previewLog, setPreviewLog] = useState<GenerationRecord | null>(null);
+  // 「生成进行中」= 正在发起请求，或当前预览记录处于后端 running 状态（后端任务化后，状态以记录为准，
+  // 刷新 / 切回来都能恢复）。统一用它 gate「开始生成」按钮 / 删除入口 / 微调。
+  const running = submitting || previewLog?.status === "running";
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   // 生成结果（产物图）的删除：多选模式开关 + 已选结果 id。仅 success / missing 这种带图床 key 的结果可删。
   const [resultSelectMode, setResultSelectMode] = useState(false);
@@ -104,11 +109,9 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
     window.localStorage.setItem(LEFT_PANEL_COLLAPSED_KEY, leftPanelCollapsed ? "1" : "0");
   }, [leftPanelCollapsed]);
   const autoPreviewedIdRef = useRef<string | null>(null);
-  // 用 ref 跟踪 generate() 是否还在跑：useEffect/previewGenerationLog 的 closure
-  // 可能拿到 stale 的 running state（先于 setRunning(true) commit 触发），
-  // ref 永远是最新值，比 useState 更稳。同时记录本会话发起的 placeholder.id，
-  // 即便 task 跑完 setRunning(false) 后，previewGenerationLog 仍能识别这条 running
-  // 占位是自己发的，避免被刷成"被中断"。
+  // isGeneratingRef：发起 /run 请求那一小段置 true，挡住 auto-preview effect 在 URL / 列表缓存
+  // 还没同步好的中间态里误把表单回填成别的记录。activeGenerationIdRef：本会话刚发起的记录 id，
+  // previewGenerationLog 用它识别「这条 running 是我自己发的」，切回来时不重置表单（结果由轮询刷新）。
   const isGeneratingRef = useRef(false);
   const activeGenerationIdRef = useRef<string | null>(null);
   // 用户点了某张图的「微调」按钮后，把当时的 previewLog.id 暂存在这里，
@@ -141,6 +144,12 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
     queryFn: () => fetchGenerations(token, { page: 1, pageSize: 100, excludeAgent: "1" }),
     enabled: Boolean(token),
     retry: false,
+    // 有 running 记录时 2s 轮询，让后端任务的进度（新出的图 / 完成）实时刷到列表 + 右侧结果；
+    // 全部终态后停止轮询。running 记录都在列表最前（按 created_at desc），不会被 100 条窗口漏掉。
+    refetchInterval: (query) => {
+      const data = query.state.data as GenerationListResponse | undefined;
+      return data?.items.some((item) => item.status === "running") ? 2000 : false;
+    },
   });
 
   useEffect(() => {
@@ -179,7 +188,41 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
     },
   });
 
+  // 把一条记录乐观写进左侧列表缓存（发起 / 重试后立即可见，并触发轮询）。跟 saveLogMutation.onSuccess 同款。
+  const upsertLogCache = (record: GenerationRecord) => {
+    queryClient.setQueryData<GenerationListResponse>(["my-generations", "exclude-agent", token], (old) => {
+      if (!old) return { items: [record], total: 1 };
+      const exists = old.items.some((item) => item.id === record.id);
+      if (exists) return { ...old, items: old.items.map((item) => (item.id === record.id ? record : item)) };
+      return { ...old, items: [record, ...old.items], total: old.total + 1 };
+    });
+  };
+
   const logs = logsQuery.data?.items || [];
+
+  // 轮询拉到新数据后，把「当前正在生成的预览记录」同步到最新，并刷新右侧结果区
+  // （成功图 / 还在生成中的占位 / 失败）。这样无论切页面、刷新、还是切到别的记录再切回，
+  // 后端任务的进度都能恢复并继续显示，直到终态。
+  useEffect(() => {
+    if (!previewLog || previewLog.status !== "running") return;
+    const fresh = logs.find((item) => item.id === previewLog.id);
+    if (!fresh) return;
+    // 状态 / 产物数 / 失败数都没变就不重复 re-derive（轮询会频繁触发本 effect）。
+    if (
+      fresh.status === previewLog.status &&
+      fresh.thumbnails.length === previewLog.thumbnails.length &&
+      (fresh.errors?.length || 0) === (previewLog.errors?.length || 0)
+    ) {
+      return;
+    }
+    setPreviewLog(fresh);
+    void deriveResultsFromRecord(fresh).then(setResults);
+    // 任务收敛（不再 running）时刷新顶栏积分——后端按实际出图张数扣费，这里同步显示。
+    if (fresh.status !== "running" && token) {
+      void fetchCurrentUser(token).then((u) => { if (typeof u?.credits === "number") setCredits(u.credits); }).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [logs]);
 
   // 直接访问 /image/{id} 或在记录列表里点击某条记录后，自动把对应记录展开到右侧。
   // ⚠️ 正在生成（isGeneratingRef）时不能跑这条 effect：generate() 自己会改 URL / logs cache / autoPreviewedIdRef，
@@ -300,171 +343,52 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
     const snapshot = buildRequestSnapshot();
     if (!snapshot) return;
 
-    setElapsedMs(0);
-    setRunning(true);
-    isGeneratingRef.current = true;
-    // 追加而不是替换：用户连续点「开始生成」时新一批 slot 接到现有 results 末尾，
-    // 旧产物保留可视。想清空回到「干净的工作台」走左侧「新建」按钮（createSession 里 setResults([])）。
-    // 切到左侧别的记录看历史时，previewGenerationLog 仍是替换语义（用那条记录的图替换 results）。
-    const slotOffset = results.length;
-    setResults((prev) => [
-      ...prev,
-      ...Array.from({ length: generationCount }, (): GenerationResult => ({ id: createId(), status: "pending" })),
-    ]);
-    const batchStartedAt = performance.now();
-    setStartedAt(batchStartedAt);
-
-    const mode = snapshot.references.length ? "edit" : "image";
     const referenceKeys = snapshot.references.map((ref) => ref.storageKey || "").filter(Boolean);
-    const sizeValue = snapshot.config.size || "";
-    const qualityValue = snapshot.config.quality || "";
-    const requestParams: Record<string, unknown> = {
-      mode,
-      n: 1,
-      size: sizeValue,
-      quality: qualityValue,
-      referenceCount: snapshot.references.length,
-    };
-    // 抓取并立刻清空"微调来源"标记。
-    // 如果用户点了某张图的微调按钮，pendingParentIdRef 指向那条 record id —— 这种情况要 spawn 新记录。
+    // /image 的参考图都走 useImageUploader 落盘（有 storageKey）。万一有还没传完的，挡一下。
+    if (snapshot.references.length && referenceKeys.length !== snapshot.references.length) {
+      message.error("参考图还没上传完成，请稍候再试");
+      return;
+    }
+    const mode: GenerationRecord["mode"] = referenceKeys.length ? "edit" : "image";
+
+    // 抓取并清空「微调来源」标记：有 parentId → 新建一条记录（parent 指向源记录）。
     const parentId = pendingParentIdRef.current || undefined;
     pendingParentIdRef.current = null;
-
-    // 路径判定：
-    //   - 微调（有 parentId）→ 创建新记录，parent 指向源记录
-    //   - 当前已有 previewLog（同记录内迭代）→ 编辑现有记录（count / thumbnails / errors / durationMs 都累加）
-    //   - 没有 previewLog（点过「新建」或首次进 /image）→ 创建新记录
+    // 没有 parentId 且当前已有 previewLog → 在这条记录上「二次生成累加」；否则新建一条。
     // 想强制开新记录走左侧「新建」按钮（清掉 previewLog）。
-    const editingLog: GenerationRecord | null = !parentId && previewLog ? previewLog : null;
+    const appendId = !parentId && previewLog ? previewLog.id : undefined;
 
-    // 第一阶段：把记录标 running。
-    //   - 编辑模式：PUT 把现有记录 count += generationCount + status="running"，thumbnails / successCount / failCount 保持。
-    //   - 新建模式：POST 一条新 placeholder（count = generationCount, status="running"），切 URL。
-    let recordId: string;
-    if (editingLog) {
-      try {
-        const running = await saveLogMutation.mutateAsync({
-          id: editingLog.id,
-          prompt: text,
-          mode,
-          model: editingLog.model,
-          size: sizeValue,
-          quality: qualityValue,
-          count: editingLog.count + generationCount,
-          successCount: editingLog.successCount,
-          failCount: editingLog.failCount,
-          durationMs: editingLog.durationMs,
-          status: "running",
-          thumbnails: editingLog.thumbnails,
-          references: referenceKeys,
-          errors: editingLog.errors,
-          requestParams,
-          upstreamMeta: editingLog.upstreamMeta,
-          parentId: editingLog.parentId || undefined,
-        });
-        setPreviewLog(running);
-        recordId = editingLog.id;
-        activeGenerationIdRef.current = editingLog.id;
-        // URL 不变：用户已经在 /image/{editingLog.id}
-      } catch {
-        // mutation onError 已弹 message；首阶段都没入库，中止避免空转。
-        setRunning(false);
-        isGeneratingRef.current = false;
-        return;
-      }
-    } else {
-      let placeholder: GenerationRecord;
-      try {
-        placeholder = await saveLogMutation.mutateAsync({
-          prompt: text,
-          mode,
-          model: "",
-          size: sizeValue,
-          quality: qualityValue,
-          count: generationCount,
-          successCount: 0,
-          failCount: 0,
-          durationMs: 0,
-          status: "running",
-          thumbnails: [],
-          references: referenceKeys,
-          errors: [],
-          requestParams,
-          upstreamMeta: "",
-          parentId,
-        });
-      } catch {
-        setRunning(false);
-        isGeneratingRef.current = false;
-        return;
-      }
-      setPreviewLog(placeholder);
-      autoPreviewedIdRef.current = placeholder.id;
-      activeGenerationIdRef.current = placeholder.id;
-      router.replace(`/image/${placeholder.id}`);
-      recordId = placeholder.id;
-    }
-
-    // 第二阶段：跑全部 task。
-    // slotOffset 是这批 pending slot 在追加后的 results 数组里的起始下标，
-    // runGenerationSlot 拿到的 index 是绝对位置，updateResultAt 才能定位到正确的卡片。
-    const tasks = Array.from({ length: generationCount }, (_, index) => runGenerationSlot(slotOffset + index, snapshot));
-    const result = await Promise.allSettled(tasks);
-    const successItems = result
-      .filter((item): item is PromiseFulfilledResult<SlotOutcome> => item.status === "fulfilled")
-      .map((item) => item.value);
-    const batchSuccessImages = successItems.map((item) => item.image);
-    const batchSuccessCount = batchSuccessImages.length;
-    const batchFailCount = generationCount - batchSuccessCount;
-    const batchFailed = result.find((item): item is PromiseRejectedResult => item.status === "rejected");
-    const batchDurationMs = performance.now() - batchStartedAt;
-    const batchErrors = result
-      .filter((item): item is PromiseRejectedResult => item.status === "rejected")
-      .map((item) => (item.reason instanceof Error ? item.reason.message : String(item.reason)));
-    const batchUpstreamMeta = successItems[successItems.length - 1]?.upstreamMeta || "";
-
-    // 累加（编辑模式）或单批（新建模式）
-    const totalCount = editingLog ? editingLog.count + generationCount : generationCount;
-    const totalSuccessCount = (editingLog?.successCount || 0) + batchSuccessCount;
-    const totalFailCount = (editingLog?.failCount || 0) + batchFailCount;
-    const totalDurationMs = (editingLog?.durationMs || 0) + batchDurationMs;
-    const accumulatedThumbnails = [
-      ...(editingLog?.thumbnails || []),
-      ...batchSuccessImages.map((image) => image.storageKey || "").filter(Boolean),
-    ];
-    const accumulatedErrors = [...(editingLog?.errors || []), ...batchErrors];
-    const finalStatus = totalSuccessCount === totalCount ? "success" : totalSuccessCount ? "partial" : "failed";
-
+    setSubmitting(true);
+    setStartedAt(performance.now());
+    setElapsedMs(0);
+    isGeneratingRef.current = true;
     try {
-      const saved = await saveLogMutation.mutateAsync({
-        id: recordId,
+      // 后端建（或追加）一条 running 记录 + 起后台任务，立即返回。生成本身在服务端跑，
+      // 刷新 / 切走 / 换设备都不影响——回来轮询这条记录继续看进度。
+      const record = await runGeneration(token, {
+        id: appendId,
         prompt: text,
         mode,
-        model: editingLog?.model || "",
-        size: sizeValue,
-        quality: qualityValue,
-        count: totalCount,
-        successCount: totalSuccessCount,
-        failCount: totalFailCount,
-        durationMs: totalDurationMs,
-        status: finalStatus,
-        thumbnails: accumulatedThumbnails,
+        size: snapshot.config.size || "",
+        quality: snapshot.config.quality || "",
+        count: generationCount,
         references: referenceKeys,
-        errors: accumulatedErrors,
-        requestParams,
-        upstreamMeta: batchUpstreamMeta || editingLog?.upstreamMeta || "",
-        parentId: editingLog?.parentId || parentId,
+        parentId,
       });
-      setPreviewLog(saved);
-      // toast 以「本次新批次」为准，跟旧累计无关：用户关心的是这次点击有没有成功
-      batchSuccessCount
-        ? message.success(editingLog ? "图片已追加" : "图片已生成")
-        : message.error(batchFailed?.reason instanceof Error ? batchFailed.reason.message : "生成失败");
+      upsertLogCache(record);
+      setPreviewLog(record);
+      activeGenerationIdRef.current = record.id;
+      autoPreviewedIdRef.current = record.id;
+      // 立即渲染「生成中」占位（count - 已成功 - 已失败 张转圈）；之后由轮询刷新成实际产物。
+      setResults(await deriveResultsFromRecord(record));
+      if (!appendId) router.replace(`/image/${record.id}`);
+      // 触发列表刷新 → refetchInterval 看到 running 记录后开始 2s 轮询。
+      void queryClient.invalidateQueries({ queryKey: ["my-generations"] });
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "发起生成失败");
     } finally {
-      setRunning(false);
+      setSubmitting(false);
       isGeneratingRef.current = false;
-      // 即使 task 跑完，本会话发起的这条 placeholder 仍在 activeGenerationIdRef 里，
-      // 防止 useEffect 后续重新触发时把这条记录的 results 刷成"被中断"。
     }
   };
 
@@ -676,6 +600,42 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
     });
   };
 
+  // 把一条记录映射成右侧「生成结果」卡片数组：
+  //  - thumbnails 逐张解析 → 成功卡（本地缓存找不到也能用 /api/images 直链；极端情况显示「缓存丢失」）
+  //  - errors 每条 → 失败卡（带后端给的中文错误）
+  //  - 还差的张数 = count - 成功 - 失败：running 时显示「生成中」转圈占位；非 running 兜底当失败。
+  const deriveResultsFromRecord = async (log: GenerationRecord): Promise<GenerationResult[]> => {
+    const resolved = await Promise.all((log.thumbnails || []).map(async (storageKey, index) => {
+      const url = await resolveImageUrl(storageKey, "");
+      if (!url) return { kind: "missing" as const, storageKey, index };
+      try {
+        const meta = await readImageMeta(url);
+        return { kind: "success" as const, image: { id: `${log.id}-${index}`, dataUrl: url, storageKey, durationMs: log.durationMs, width: meta.width, height: meta.height, bytes: 0 }, index };
+      } catch {
+        return { kind: "success" as const, image: { id: `${log.id}-${index}`, dataUrl: url, storageKey, durationMs: log.durationMs, width: 0, height: 0, bytes: 0 }, index };
+      }
+    }));
+    const successResults: GenerationResult[] = resolved
+      .filter((item): item is Extract<typeof item, { kind: "success" }> => item.kind === "success")
+      .map((item) => ({ id: item.image.id, status: "success", image: item.image, storageKey: item.image.storageKey }));
+    const missingResults: GenerationResult[] = resolved
+      .filter((item): item is Extract<typeof item, { kind: "missing" }> => item.kind === "missing")
+      .map((item) => ({ id: `${log.id}-missing-${item.index}`, status: "missing", error: "本地图片缓存丢失", storageKey: item.storageKey }));
+    const failedResults: GenerationResult[] = (log.errors || []).map((err, index) => ({
+      id: `${log.id}-fail-${index}`,
+      status: "failed",
+      error: err || "生成失败",
+    }));
+    const accounted = successResults.length + missingResults.length + failedResults.length;
+    const pendingCount = Math.max(0, (log.count || 0) - accounted);
+    const pendingResults: GenerationResult[] = Array.from({ length: pendingCount }, (_, index) => (
+      log.status === "running"
+        ? { id: `${log.id}-pending-${index}`, status: "pending" }
+        : { id: `${log.id}-fail-extra-${index}`, status: "failed", error: "生成失败" }
+    ));
+    return [...successResults, ...missingResults, ...failedResults, ...pendingResults];
+  };
+
   const previewGenerationLog = async (log: GenerationRecord, options: { skipNavigate?: boolean } = {}) => {
     setPreviewLog(log);
     setLogsOpen(false);
@@ -719,48 +679,8 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
       setReferences([]);
     }
 
-    // 右侧"生成结果"区域逐张恢复：
-    //  - 成功且 IndexedDB 还能找到图片 → 显示成功卡
-    //  - 成功但本地图片缓存丢失（换浏览器/清缓存）→ 显示"缓存丢失"卡，区别于真正失败
-    //  - 原本就生成失败的张数 → 失败占位卡
-    const resolved = await Promise.all(log.thumbnails.map(async (storageKey, index) => {
-      const url = await resolveImageUrl(storageKey, "");
-      if (!url) return { kind: "missing" as const, storageKey, index };
-      try {
-        const meta = await readImageMeta(url);
-        return {
-          kind: "success" as const,
-          image: { id: `${log.id}-${index}`, dataUrl: url, storageKey, durationMs: log.durationMs, width: meta.width, height: meta.height, bytes: 0 },
-          index,
-        };
-      } catch {
-        return {
-          kind: "success" as const,
-          image: { id: `${log.id}-${index}`, dataUrl: url, storageKey, durationMs: log.durationMs, width: 0, height: 0, bytes: 0 },
-          index,
-        };
-      }
-    }));
-
-    const successResults: GenerationResult[] = resolved
-      .filter((item): item is Extract<typeof item, { kind: "success" }> => item.kind === "success")
-      .map((item) => ({ id: item.image.id, status: "success", image: item.image, storageKey: item.image.storageKey }));
-    const missingResults: GenerationResult[] = resolved
-      .filter((item): item is Extract<typeof item, { kind: "missing" }> => item.kind === "missing")
-      .map((item) => ({ id: `${log.id}-missing-${item.index}`, status: "missing", error: "本地图片缓存丢失", storageKey: item.storageKey }));
-
-    const accountedSlots = successResults.length + missingResults.length;
-    const totalSlots = Math.max(log.count || 0, accountedSlots + (log.failCount || 0));
-    const failedSlotCount = Math.max(0, totalSlots - accountedSlots);
-    // running 状态意味着这条记录在 task 跑完前页面就被关掉/刷新，前端 task 已丢失，
-    // 把剩余 slot 显示成"已中断，请重试"，跟真实的"生成失败"做语义区分。
-    const failedErrorMessage = log.status === "running" ? "生成被中断，请点击重试" : "生成失败";
-    const failedResults: GenerationResult[] = Array.from({ length: failedSlotCount }, (_, index) => ({
-      id: `${log.id}-fail-${index}`,
-      status: "failed",
-      error: failedErrorMessage,
-    }));
-    setResults([...successResults, ...missingResults, ...failedResults]);
+    // 右侧「生成结果」区域按记录实时状态渲染：成功图 + 还在生成中的占位（running）+ 失败槽。
+    setResults(await deriveResultsFromRecord(log));
 
     if (!options.skipNavigate) {
       autoPreviewedIdRef.current = log.id;
@@ -781,117 +701,17 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
     return { text, config: { ...config, count: "1" }, references: [...references] };
   };
 
-  type SlotOutcome = { image: GeneratedImage; upstreamMeta?: string };
-  const runGenerationSlot = async (index: number, snapshot: { text: string; config: AiConfig; references: ReferenceImage[] }): Promise<SlotOutcome> => {
-    const itemStartedAt = performance.now();
+  // 重试：让后端删一条失败 error、置 running、后台补跑一张。前端拿回更新后的记录 + 开始轮询。
+  const retryResult = async () => {
+    if (!previewLog || !token) return;
     try {
-      const res = snapshot.references.length
-        ? await requestEdit(token, snapshot.config, snapshot.text, snapshot.references)
-        : await requestGeneration(token, snapshot.config, snapshot.text);
-      const image = res.images[0];
-      if (!image) throw new Error("接口没有返回图片");
-      const stored = await uploadImage(image.dataUrl);
-      const meta = await readImageMeta(stored.url);
-      const nextImage: GeneratedImage = { id: image.id, dataUrl: stored.url, storageKey: stored.storageKey, durationMs: performance.now() - itemStartedAt, width: meta.width, height: meta.height, bytes: getDataUrlByteSize(image.dataUrl) };
-      setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
-      return { image: nextImage, upstreamMeta: res.upstreamMeta };
+      const record = await retryGeneration(token, previewLog.id);
+      upsertLogCache(record);
+      setPreviewLog(record);
+      setResults(await deriveResultsFromRecord(record));
+      void queryClient.invalidateQueries({ queryKey: ["my-generations"] });
     } catch (error) {
-      setResults((value) => updateResultAt(value, index, { status: "failed", error: error instanceof Error ? error.message : "生成失败" }));
-      throw error;
-    }
-  };
-
-  const retryResult = async (index: number) => {
-    const snapshot = buildRequestSnapshot();
-    if (!snapshot) return;
-    const currentLog = previewLog;
-    setResults((value) => updateResultAt(value, index, { status: "pending", error: undefined, image: undefined }));
-    let retried: SlotOutcome | undefined;
-    let retryError = "";
-    try {
-      retried = await runGenerationSlot(index, snapshot);
-    } catch (error) {
-      retryError = error instanceof Error ? error.message : "生成失败";
-    }
-    if (!currentLog) return;
-
-    // 重试用的参考图可能跟首次不同（用户失败后又新加了图），用 snapshot 抓的实际
-    // 调用值更新到记录里，下次刷新才能恢复出参考图列表。
-    const newReferences = snapshot.references.map((ref) => ref.storageKey || "").filter(Boolean);
-    const newMode = newReferences.length ? "edit" : "image";
-    const newRequestParams: Record<string, unknown> = {
-      mode: newMode,
-      n: 1,
-      size: currentLog.size,
-      quality: currentLog.quality,
-      referenceCount: newReferences.length,
-      retry: true,
-    };
-
-    if (!retried) {
-      // 重试失败：只把错误信息追加到 errors，不动 thumbnails / successCount，
-      // upstreamMeta 保持原有不覆盖。
-      const nextErrors = [...(currentLog.errors || [])];
-      if (retryError) nextErrors.push(retryError);
-      try {
-        const saved = await saveLogMutation.mutateAsync({
-          id: currentLog.id,
-          prompt: currentLog.prompt,
-          mode: newMode,
-          model: currentLog.model,
-          size: currentLog.size,
-          quality: currentLog.quality,
-          count: currentLog.count,
-          successCount: currentLog.successCount,
-          failCount: currentLog.failCount,
-          durationMs: currentLog.durationMs,
-          status: currentLog.status,
-          thumbnails: currentLog.thumbnails,
-          references: newReferences,
-          errors: nextErrors,
-          requestParams: newRequestParams,
-          upstreamMeta: currentLog.upstreamMeta,
-        });
-        setPreviewLog(saved);
-      } catch {
-        // mutation onError 已 message 提示
-      }
-      return;
-    }
-
-    // 重试成功：upsert thumbnails、successCount/failCount、最新的 upstreamMeta。
-    const retriedImage = retried.image;
-    if (!retriedImage.storageKey) return;
-    const nextThumbnails = [...currentLog.thumbnails];
-    if (!nextThumbnails.includes(retriedImage.storageKey)) {
-      nextThumbnails.push(retriedImage.storageKey);
-    }
-    const successCount = Math.min(currentLog.count, currentLog.successCount + 1);
-    const failCount = Math.max(0, currentLog.failCount - 1);
-    const newStatus = successCount >= currentLog.count ? "success" : successCount > 0 ? "partial" : "failed";
-
-    try {
-      const saved = await saveLogMutation.mutateAsync({
-        id: currentLog.id,
-        prompt: currentLog.prompt,
-        mode: newMode,
-        model: currentLog.model,
-        size: currentLog.size,
-        quality: currentLog.quality,
-        count: currentLog.count,
-        successCount,
-        failCount,
-        durationMs: currentLog.durationMs,
-        status: newStatus,
-        thumbnails: nextThumbnails,
-        references: newReferences,
-        errors: currentLog.errors,
-        requestParams: newRequestParams,
-        upstreamMeta: retried.upstreamMeta || currentLog.upstreamMeta,
-      });
-      setPreviewLog(saved);
-    } catch {
-      // mutation onError 已 message 提示
+      message.error(error instanceof Error ? error.message : "重试失败");
     }
   };
 
@@ -1063,7 +883,7 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
                       {!running && deletableResults.length > 0 ? (
                         <Button size="small" icon={<CheckSquare className="size-3.5" />} onClick={() => setResultSelectMode(true)}>选择删除</Button>
                       ) : null}
-                      {running ? <Tag className="m-0 px-2 py-1">等待 {formatDuration(elapsedMs)}</Tag> : null}
+                      {running ? <Tag color="blue" className="m-0 px-2 py-1">生成中{elapsedMs ? ` ${formatDuration(elapsedMs)}` : "…"}</Tag> : null}
                     </>
                   )}
                 </div>
@@ -1076,7 +896,7 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
                     ) : result.status === "missing" ? (
                       <MissingImageCard key={result.id} selectMode={resultSelectMode} selected={selectedResultIds.includes(result.id)} onToggleSelect={() => toggleResultSelected(result.id)} onDelete={running ? undefined : () => confirmDeleteSingleResult(result)} />
                     ) : result.status === "failed" ? (
-                      <FailedImageCard key={result.id} error={result.error || "生成失败"} onRetry={() => retryResult(index)} />
+                      <FailedImageCard key={result.id} error={result.error || "生成失败"} onRetry={() => void retryResult()} />
                     ) : (
                       <PendingImageCard key={result.id} />
                     )
@@ -1274,10 +1094,6 @@ function MissingImageCard({ selectMode, selected, onToggleSelect, onDelete }: { 
       ) : null}
     </div>
   );
-}
-
-function updateResultAt(results: GenerationResult[], index: number, next: Partial<GenerationResult>) {
-  return results.map((item, itemIndex) => itemIndex === index ? { ...item, ...next } : item);
 }
 
 function LogPanel({ logs, selectedLogIds, activeLogId, onSelectedLogIdsChange, onCreateSession, onDeleteSelected, onPreviewLog, onCollapse }: { logs: GenerationRecord[]; selectedLogIds: string[]; activeLogId?: string; onSelectedLogIdsChange: (ids: string[]) => void; onCreateSession: () => void; onDeleteSelected: () => void; onPreviewLog: (log: GenerationRecord) => void; onCollapse?: () => void }) {
