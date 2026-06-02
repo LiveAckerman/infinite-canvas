@@ -391,13 +391,15 @@ function RunStepCard({ index, step, run, agents, postSourceKeys, disabled, onCha
 
   // post run 第一步：输入是多张数据源（来自同批次主条产物），不走 seed / 手动覆盖那套。
   const isPostSource = Array.isArray(postSourceKeys);
-  // 「是否有可用输入」用来 gate 运行按钮：post run 看数据源是否解析到，普通步看单张 inputKey。
-  const hasInput = isPostSource ? postSourceKeys!.length > 0 : Boolean(inputKey);
 
   // 计算当前输入 key（前端独立算一份，跟后端 runner 一致）
   const inputKey = step.manualOverrideKey
     || (index === 0 ? run.seedKey : (run.steps[index - 1]?.status === "success" ? run.steps[index - 1].outputKey || "" : ""));
   const inputSource: "manual" | "upstream" | "seed" = step.manualOverrideKey ? "manual" : index === 0 ? "seed" : "upstream";
+
+  // 「是否有可用输入」用来 gate 运行按钮：post run 看数据源是否解析到，普通步看单张 inputKey。
+  // 注意：必须放在 inputKey 声明之后，否则 TS 报 used-before-declaration。
+  const hasInput = isPostSource ? postSourceKeys!.length > 0 : Boolean(inputKey);
 
   const lastSnap = step.lastRunSnapshot;
   const lastWasIterate = lastSnap?.inputSource === "iterate";

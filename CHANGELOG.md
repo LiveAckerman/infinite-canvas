@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.0.41 - 2026-06-02
+
++ [新增] **图片上传前自动压缩 + 5MB 硬上限兜底**：之前用户传手机拍的 4-12MB 大图，多张参考图打包后撞上游 cpa-manager 的 32MB multipart 限制（`{"code":"request_failed","error":"request body exceeds 33554432-byte limit"}`），生图直接失败。现在 `useImageUploader` 入口加一层 `browser-image-compression`：① 所有上传（角色头像 / 角色参考图 / 工作台参考图 / 素材封面 / 画布原图 / 助手图）自动压缩到「长边 ≤ 2048px + 体积 ≤ 2MB」，PNG 透明保留 PNG、其它转 JPEG q=0.85，走 WebWorker 不阻塞 UI；② 压缩后仍 > 5MB（极少见）直接拒绝并提示「请手动减小尺寸 / 拆分后再上传」；③ 上传过程 toast 文案从「正在上传」拆成「正在处理图片… → 正在上传…」让用户感知到压缩耗时（通常 0.3-1.5s）。压缩失败时兜底用原图，不影响正常流程。极少需要原图精度的场景可以传 `skipCompress: true` 跳过（暂未在 UI 暴露）。
+
++ [优化] **生图工作台「生成结果」支持删除（单张 / 多选 / 全部）**：之前一条生成记录里的产物图只能整条记录删，没法单独剔掉其中某张。现在「生成结果」区每张图 hover 多了「删除」按钮（单张）；右上角「选择删除」进多选模式后，每张图带勾选框，可「全选 / 删除选中 / 删除全部」。删除会从该记录的 `thumbnails` 里剔除对应图、重算 `count / successCount / status` 后整条 upsert；若删到一张产物都不剩（也没有失败槽），则直接删掉整条记录并回到空白工作台。被删的图片资源由后端做孤儿清理：`SaveGeneration` 更新时 diff 出「旧有、新无」的 thumbnails/references key，保存成功后对这些 key 跑 `CleanupImagesByKeysIfOrphan`（仍被画布 / 素材 / 别的记录引用的会保留）。正常生成流程 thumbnails 只增不减、removedKeys 为空，不会触发多余扫表。
+
 ## v0.0.40 - 2026-06-02
 
 + [修复] **后处理（post）run 详情页不显示数据源参考图**：批次后处理 run 没有单张 seed，输入来自 `sourceRefs`（指向同批次各主条的某步产物）。但 run 详情页只拉了自己这一条 run，左侧「原图」面板和步骤输入都按单张 `seedKey` 渲染 → 一律显示「无」。现在详情页识别 `kind==="post"` 时按需再拉一次所属批次，复用 `resolvePostSourceKeys` 把 `sourceRefs` 解析成实际图片，左侧改成「数据源 N 张」缩略图面板、步骤输入区也列出这 N 张（可点击放大），「运行 / 重做」按钮改成按数据源是否解析到来 gate（不再卡在 `!inputKey`）。顺带把批次详情卡 `PostRunCard` 里重复的同段解析逻辑也换成共用的 `resolvePostSourceKeys`。

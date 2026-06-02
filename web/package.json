@@ -18,6 +18,7 @@
     "@tanstack/react-query": "^5.100.9",
     "antd": "^6.4.2",
     "axios": "^1.16.0",
+    "browser-image-compression": "^2.0.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "copy-to-clipboard": "^4.0.2",

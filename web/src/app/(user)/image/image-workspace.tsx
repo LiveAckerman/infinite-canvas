@@ -49,6 +49,9 @@ type GenerationResult = {
   status: GenerationResultStatus;
   image?: GeneratedImage;
   error?: string;
+  // 该结果对应的图床 storageKey（success 用 image.storageKey；missing 没有 image 但仍有 key）。
+  // 删除生成结果时按它从 generation.thumbnails 里剔除。
+  storageKey?: string;
 };
 
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
@@ -61,7 +64,7 @@ export type ImageWorkspaceProps = {
 };
 
 export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const queryClient = useQueryClient();
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -82,6 +85,9 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
   const [selectedLogIds, setSelectedLogIds] = useState<string[]>([]);
   const [previewLog, setPreviewLog] = useState<GenerationRecord | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  // 生成结果（产物图）的删除：多选模式开关 + 已选结果 id。仅 success / missing 这种带图床 key 的结果可删。
+  const [resultSelectMode, setResultSelectMode] = useState(false);
+  const [selectedResultIds, setSelectedResultIds] = useState<string[]>([]);
   // 拖拽图片到提示词 / 参考图区域时的视觉高亮，松手或离开时复位
   const [dragHighlight, setDragHighlight] = useState(false);
   // 「加入提示词库」Modal 开关
@@ -548,6 +554,8 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
     setElapsedMs(0);
     setStartedAt(0);
     setSelectedLogIds([]);
+    setResultSelectMode(false);
+    setSelectedResultIds([]);
     setPreviewLog(null);
     autoPreviewedIdRef.current = null;
     activeGenerationIdRef.current = null;
@@ -575,9 +583,105 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
     setDeleteConfirmOpen(false);
   };
 
+  // ===== 生成结果（产物图）删除：单张 / 多选 / 全部 =====
+  // 只有带图床 key 的结果（success / missing）能删；pending / failed（没有真实图）不参与。
+  const resultStorageKey = (result: GenerationResult) => result.image?.storageKey || result.storageKey || "";
+  const isDeletableResult = (result: GenerationResult) =>
+    (result.status === "success" || result.status === "missing") && Boolean(resultStorageKey(result));
+  const deletableResults = useMemo(() => results.filter(isDeletableResult), [results]);
+  const allResultsSelected = deletableResults.length > 0 && selectedResultIds.length === deletableResults.length;
+
+  const toggleResultSelected = (id: string) => {
+    setSelectedResultIds((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
+  };
+  const toggleSelectAllResults = () => {
+    setSelectedResultIds(allResultsSelected ? [] : deletableResults.map((result) => result.id));
+  };
+  const exitResultSelectMode = () => {
+    setResultSelectMode(false);
+    setSelectedResultIds([]);
+  };
+
+  // 真正执行删除：把选中结果对应的 storageKey 从当前记录的 thumbnails 里剔除，重算 count/success/status 后整条 upsert。
+  // 后端 SaveGeneration 会对被移除且无人引用的图片做孤儿清理。删空（无产物也无失败槽）则直接删整条记录。
+  const performDeleteResults = async (ids: string[]) => {
+    if (!previewLog || running) return;
+    const idSet = new Set(ids);
+    const removedKeys = results.filter((result) => idSet.has(result.id)).map(resultStorageKey).filter(Boolean);
+    if (!removedKeys.length) return;
+    const remaining = results.filter((result) => !idSet.has(result.id));
+    const newThumbnails = previewLog.thumbnails.filter((key) => !removedKeys.includes(key));
+    const failCount = previewLog.failCount || 0;
+    const newSuccessCount = newThumbnails.length;
+    const newCount = newSuccessCount + failCount;
+    try {
+      if (newCount === 0) {
+        // 没有任何产物 / 失败槽了 → 整条记录已无意义，直接删掉回到空白工作台。
+        await deleteLogMutation.mutateAsync(previewLog.id);
+        setPreviewLog(null);
+        setResults([]);
+        autoPreviewedIdRef.current = null;
+        router.replace("/image");
+      } else {
+        const newStatus: GenerationRecord["status"] = newSuccessCount === 0 ? "failed" : failCount === 0 ? "success" : "partial";
+        const saved = await saveLogMutation.mutateAsync({
+          ...previewLog,
+          thumbnails: newThumbnails,
+          successCount: newSuccessCount,
+          failCount,
+          count: newCount,
+          status: newStatus,
+        });
+        setPreviewLog(saved);
+        setResults(remaining);
+      }
+      exitResultSelectMode();
+      message.success(removedKeys.length > 1 ? `已删除 ${removedKeys.length} 张` : "已删除");
+    } catch {
+      // saveLogMutation / deleteLogMutation 自带错误提示
+    }
+  };
+
+  const confirmDeleteSingleResult = (result: GenerationResult) => {
+    modal.confirm({
+      title: "删除这张生成结果",
+      content: "确定删除这张图片吗？图片资源会一并删除（仍被别处引用的，比如已加入素材库 / 画布的，会保留）。",
+      okText: "删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: () => performDeleteResults([result.id]),
+    });
+  };
+  const confirmDeleteSelectedResults = () => {
+    if (!selectedResultIds.length) return;
+    modal.confirm({
+      title: `删除选中的 ${selectedResultIds.length} 张生成结果`,
+      content: "确定删除选中的图片吗？图片资源会一并删除（仍被别处引用的会保留）。",
+      okText: "删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: () => performDeleteResults(selectedResultIds),
+    });
+  };
+  const confirmDeleteAllResults = () => {
+    const ids = deletableResults.map((result) => result.id);
+    if (!ids.length) return;
+    modal.confirm({
+      title: "删除全部生成结果",
+      content: `确定删除当前记录的全部 ${ids.length} 张生成结果吗？图片资源会一并删除（仍被别处引用的会保留）。`,
+      okText: "全部删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: () => performDeleteResults(ids),
+    });
+  };
+
   const previewGenerationLog = async (log: GenerationRecord, options: { skipNavigate?: boolean } = {}) => {
     setPreviewLog(log);
     setLogsOpen(false);
+    // 切换查看的记录时退出产物多选态，避免选中项跨记录串台。
+    setResultSelectMode(false);
+    setSelectedResultIds([]);
 
     // 如果是当前会话正在跑、或者就是本会话刚发起的那条 placeholder（task 跑完仍可能
     // 走到 react 重新渲染调到 previewGenerationLog），千万别去重写 results，
@@ -640,10 +744,10 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
 
     const successResults: GenerationResult[] = resolved
       .filter((item): item is Extract<typeof item, { kind: "success" }> => item.kind === "success")
-      .map((item) => ({ id: item.image.id, status: "success", image: item.image }));
+      .map((item) => ({ id: item.image.id, status: "success", image: item.image, storageKey: item.image.storageKey }));
     const missingResults: GenerationResult[] = resolved
       .filter((item): item is Extract<typeof item, { kind: "missing" }> => item.kind === "missing")
-      .map((item) => ({ id: `${log.id}-missing-${item.index}`, status: "missing", error: "本地图片缓存丢失" }));
+      .map((item) => ({ id: `${log.id}-missing-${item.index}`, status: "missing", error: "本地图片缓存丢失", storageKey: item.storageKey }));
 
     const accountedSlots = successResults.length + missingResults.length;
     const totalSlots = Math.max(log.count || 0, accountedSlots + (log.failCount || 0));
@@ -942,20 +1046,35 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
                     <Button size="small" type="link" className="!h-7 !px-2" onClick={() => router.push(`/image/${previewLog.parentId}`)} icon={<Sparkles className="size-3.5" />}>来自微调</Button>
                   ) : null}
                 </div>
-                <div className="flex items-center gap-2">
-                  {previewLog && previewLog.thumbnails.length > 0 ? (
-                    <Button size="small" icon={<BookOpen className="size-3.5" />} onClick={() => setSubmitPromptOpen(true)}>加入提示词库</Button>
-                  ) : null}
-                  {running ? <Tag className="m-0 px-2 py-1">等待 {formatDuration(elapsedMs)}</Tag> : null}
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  {resultSelectMode ? (
+                    <>
+                      <span className="text-xs text-stone-500 dark:text-stone-400">已选 {selectedResultIds.length} / {deletableResults.length}</span>
+                      <Button size="small" onClick={toggleSelectAllResults}>{allResultsSelected ? "取消全选" : "全选"}</Button>
+                      <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedResultIds.length} onClick={confirmDeleteSelectedResults}>删除选中</Button>
+                      <Button size="small" danger onClick={confirmDeleteAllResults}>删除全部</Button>
+                      <Button size="small" type="text" onClick={exitResultSelectMode}>完成</Button>
+                    </>
+                  ) : (
+                    <>
+                      {previewLog && previewLog.thumbnails.length > 0 ? (
+                        <Button size="small" icon={<BookOpen className="size-3.5" />} onClick={() => setSubmitPromptOpen(true)}>加入提示词库</Button>
+                      ) : null}
+                      {!running && deletableResults.length > 0 ? (
+                        <Button size="small" icon={<CheckSquare className="size-3.5" />} onClick={() => setResultSelectMode(true)}>选择删除</Button>
+                      ) : null}
+                      {running ? <Tag className="m-0 px-2 py-1">等待 {formatDuration(elapsedMs)}</Tag> : null}
+                    </>
+                  )}
                 </div>
               </div>
               {results.length ? (
                 <div className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-3">
                   {results.map((result, index) => (
                     result.status === "success" && result.image ? (
-                      <ResultImageCard key={result.id} image={result.image} index={index} onEdit={addResultToReferences} onDownload={downloadImage} onSaveAsset={saveResultToAssets} onRefine={previewLog ? refineResult : undefined} />
+                      <ResultImageCard key={result.id} image={result.image} index={index} onEdit={addResultToReferences} onDownload={downloadImage} onSaveAsset={saveResultToAssets} onRefine={previewLog ? refineResult : undefined} selectMode={resultSelectMode} selected={selectedResultIds.includes(result.id)} onToggleSelect={() => toggleResultSelected(result.id)} onDelete={running ? undefined : () => confirmDeleteSingleResult(result)} />
                     ) : result.status === "missing" ? (
-                      <MissingImageCard key={result.id} />
+                      <MissingImageCard key={result.id} selectMode={resultSelectMode} selected={selectedResultIds.includes(result.id)} onToggleSelect={() => toggleResultSelected(result.id)} onDelete={running ? undefined : () => confirmDeleteSingleResult(result)} />
                     ) : result.status === "failed" ? (
                       <FailedImageCard key={result.id} error={result.error || "生成失败"} onRetry={() => retryResult(index)} />
                     ) : (
@@ -1067,20 +1186,28 @@ function GenerationSettings({ config, updateConfig }: { config: AiConfig; update
   );
 }
 
-function ResultImageCard({ image, index, onEdit, onDownload, onSaveAsset, onRefine }: { image: GeneratedImage; index: number; onEdit: (image: GeneratedImage, index: number) => void; onDownload: (image: GeneratedImage, index: number) => void; onSaveAsset: (image: GeneratedImage, index: number) => void; onRefine?: (image: GeneratedImage) => void }) {
+function ResultImageCard({ image, index, onEdit, onDownload, onSaveAsset, onRefine, selectMode, selected, onToggleSelect, onDelete }: { image: GeneratedImage; index: number; onEdit: (image: GeneratedImage, index: number) => void; onDownload: (image: GeneratedImage, index: number) => void; onSaveAsset: (image: GeneratedImage, index: number) => void; onRefine?: (image: GeneratedImage) => void; selectMode?: boolean; selected?: boolean; onToggleSelect?: () => void; onDelete?: () => void }) {
   return (
-    <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
+    <div className={`overflow-hidden rounded-lg border bg-background transition-colors dark:bg-background ${selected ? "border-blue-500 ring-1 ring-blue-500 dark:border-blue-400" : "border-stone-200 dark:border-stone-800"}`}>
       {/* 桌面端：图片 hover 才显示按钮浮层；移动端：始终显示（lg:opacity-0 控制只让 lg+ 默认隐藏） */}
       <div className="group relative">
-        <Image src={image.dataUrl} alt={`生成结果 ${index + 1}`} className="aspect-square object-cover" />
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-wrap items-end justify-end gap-1.5 bg-gradient-to-t from-black/70 via-black/35 to-transparent p-2 opacity-100 transition-opacity duration-150 lg:opacity-0 lg:group-hover:opacity-100">
-          <div className="pointer-events-auto flex flex-wrap justify-end gap-1">
-            {onRefine ? <Button size="small" type="primary" icon={<Sparkles className="size-3.5" />} onClick={() => onRefine(image)}>AI 微调</Button> : null}
-            <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => void onSaveAsset(image, index)}>素材</Button>
-            <Button size="small" icon={<PenLine className="size-3.5" />} onClick={() => void onEdit(image, index)}>参考图</Button>
-            <Button size="small" icon={<Download className="size-3.5" />} onClick={() => onDownload(image, index)}>下载</Button>
+        <Image src={image.dataUrl} alt={`生成结果 ${index + 1}`} className="aspect-square object-cover" preview={selectMode ? false : undefined} />
+        {/* 多选模式：整张图盖一层点击切换选中 + 左上角勾选框 */}
+        {selectMode ? (
+          <button type="button" onClick={onToggleSelect} className="absolute inset-0 z-10 cursor-pointer bg-black/0 transition-colors hover:bg-black/10" aria-label={selected ? "取消选中" : "选中"}>
+            <span className="absolute left-2 top-2"><Checkbox checked={selected} /></span>
+          </button>
+        ) : (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-wrap items-end justify-end gap-1.5 bg-gradient-to-t from-black/70 via-black/35 to-transparent p-2 opacity-100 transition-opacity duration-150 lg:opacity-0 lg:group-hover:opacity-100">
+            <div className="pointer-events-auto flex flex-wrap justify-end gap-1">
+              {onRefine ? <Button size="small" type="primary" icon={<Sparkles className="size-3.5" />} onClick={() => onRefine(image)}>AI 微调</Button> : null}
+              <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => void onSaveAsset(image, index)}>素材</Button>
+              <Button size="small" icon={<PenLine className="size-3.5" />} onClick={() => void onEdit(image, index)}>参考图</Button>
+              <Button size="small" icon={<Download className="size-3.5" />} onClick={() => onDownload(image, index)}>下载</Button>
+              {onDelete ? <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={onDelete}>删除</Button> : null}
+            </div>
           </div>
-        </div>
+        )}
       </div>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-stone-200 px-3 py-2 text-xs text-stone-500 dark:border-stone-800 dark:text-stone-400">
         {image.width && image.height ? <span>{image.width}x{image.height}</span> : null}
@@ -1125,10 +1252,10 @@ function FailedImageCard({ error, onRetry }: { error: string; onRetry: () => voi
   );
 }
 
-function MissingImageCard() {
+function MissingImageCard({ selectMode, selected, onToggleSelect, onDelete }: { selectMode?: boolean; selected?: boolean; onToggleSelect?: () => void; onDelete?: () => void } = {}) {
   // 与"生成失败"区分开：这条记录原本生成成功了，只是图片 Blob 没存在当前浏览器里。
   return (
-    <div className="overflow-hidden rounded-lg border border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/20">
+    <div className={`relative overflow-hidden rounded-lg border bg-amber-50 transition-colors dark:bg-amber-950/20 ${selected ? "border-blue-500 ring-1 ring-blue-500 dark:border-blue-400" : "border-amber-200 dark:border-amber-900"}`}>
       <div className="flex aspect-square flex-col items-center justify-center gap-3 p-5 text-center">
         <ImageOff className="size-7 text-amber-500" />
         <div className="text-sm font-medium text-amber-700 dark:text-amber-300">图片缓存丢失</div>
@@ -1136,6 +1263,15 @@ function MissingImageCard() {
           这张图原本生成成功，但当前浏览器的本地缓存里找不到它（多发生在换浏览器、清缓存、隐身模式时）。原图无法找回，仍可看到提示词和参数。
         </Typography.Paragraph>
       </div>
+      {selectMode ? (
+        <button type="button" onClick={onToggleSelect} className="absolute inset-0 z-10 cursor-pointer bg-black/0 transition-colors hover:bg-black/5" aria-label={selected ? "取消选中" : "选中"}>
+          <span className="absolute left-2 top-2"><Checkbox checked={selected} /></span>
+        </button>
+      ) : onDelete ? (
+        <div className="absolute right-2 top-2">
+          <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={onDelete}>删除</Button>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -21,6 +21,9 @@ func SaveGeneration(userID string, item model.Generation) (model.Generation, err
 	if userID == "" {
 		return item, errors.New("请先登录")
 	}
+	// 更新时若 thumbnails / references 里某些 key 被移除（例如用户删了某张生成结果），
+	// 攒起来等保存成功后做孤儿清理。正常生成流程 thumbnails 只增不减，removedKeys 为空、不触发扫表。
+	var removedKeys []string
 	if item.ID == "" {
 		item.ID = newID("gen")
 		item.CreatedAt = now()
@@ -38,6 +41,8 @@ func SaveGeneration(userID string, item model.Generation) (model.Generation, err
 		}
 		// 保留原 created_at，避免被 client 覆盖
 		item.CreatedAt = saved.CreatedAt
+		removedKeys = removedImageKeys(saved.Thumbnails, item.Thumbnails)
+		removedKeys = append(removedKeys, removedImageKeys(saved.References, item.References)...)
 	}
 	item.UserID = userID
 	if len(item.Thumbnails) > generationThumbnailLimit {
@@ -49,7 +54,32 @@ func SaveGeneration(userID string, item model.Generation) (model.Generation, err
 	if item.Count < 0 {
 		item.Count = 0
 	}
-	return repository.SaveGeneration(item)
+	out, err := repository.SaveGeneration(item)
+	if err != nil {
+		return out, err
+	}
+	if len(removedKeys) > 0 {
+		CleanupImagesByKeysIfOrphan(userID, removedKeys)
+	}
+	return out, nil
+}
+
+// removedImageKeys 返回 oldKeys 里有、newKeys 里没有的 key（用于保存后清理被移除的孤儿图）。
+func removedImageKeys(oldKeys, newKeys []string) []string {
+	if len(oldKeys) == 0 {
+		return nil
+	}
+	keep := make(map[string]bool, len(newKeys))
+	for _, k := range newKeys {
+		keep[k] = true
+	}
+	var removed []string
+	for _, k := range oldKeys {
+		if k != "" && !keep[k] {
+			removed = append(removed, k)
+		}
+	}
+	return removed
 }
 
 func DeleteGeneration(userID string, id string) error {
