@@ -623,7 +623,8 @@ async function invokeStep(token: string, agent: Agent, extraNote: string, inputK
 //   - stepIndex === -1 → 用那条 main run 的 seedKey
 //   - stepIndex >= 0  → 用那条 main run.steps[stepIndex].outputKey（必须是 success 且非空）
 // 找不到对应主条 / 步骤未成功 / outputKey 为空 → 该 ref 静默忽略；调用方根据剩余 keys 数量判断是否报错。
-function resolvePostSourceKeys(sourceRefs: PipelineRunSourceRef[], mainRuns: PipelineRun[]): string[] {
+// 导出给批次详情卡片 / run 详情页复用，避免到处重复同一段解析逻辑。
+export function resolvePostSourceKeys(sourceRefs: PipelineRunSourceRef[], mainRuns: PipelineRun[]): string[] {
   const keys: string[] = [];
   for (const ref of sourceRefs) {
     const mainRun = mainRuns.find((r) => r.id === ref.runId);

@@ -26,7 +26,7 @@ import {
 } from "@/services/api/pipeline-runs";
 
 import { PipelineRunCard } from "../../components/pipeline-run-card";
-import { RUNS_QUERY_KEY } from "../../hooks/use-pipeline-run-manager";
+import { RUNS_QUERY_KEY, resolvePostSourceKeys } from "../../hooks/use-pipeline-run-manager";
 import { imageUrl } from "@/services/image-storage";
 
 const BATCHES_QUERY_KEY = ["my-pipeline-batches"] as const;
@@ -620,20 +620,7 @@ function PostRunCard({
   onRetry: () => void;
 }) {
   // 解析 sourceRefs 到实际的图片 storageKey（已经成功的 main run 步骤产物 / seed）
-  const sourceKeys = (() => {
-    const keys: string[] = [];
-    for (const ref of run.sourceRefs || []) {
-      const main = mainRuns.find((m) => m.id === ref.runId);
-      if (!main) continue;
-      if (ref.stepIndex === -1) {
-        if (main.seedKey) keys.push(main.seedKey);
-      } else if (ref.stepIndex >= 0 && ref.stepIndex < main.steps.length) {
-        const step = main.steps[ref.stepIndex];
-        if (step.status === "success" && step.outputKey) keys.push(step.outputKey);
-      }
-    }
-    return keys;
-  })();
+  const sourceKeys = resolvePostSourceKeys(run.sourceRefs || [], mainRuns);
   const step = run.steps[0]; // post run 永远是 single-step
   const outputKey = step?.outputKey || "";
   const agentName = step?.agentName || "未命名角色";

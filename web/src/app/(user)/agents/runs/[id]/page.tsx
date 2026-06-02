@@ -2,7 +2,7 @@
 
 import { ArrowLeft, ChevronRight, Download, Loader2, Pencil, Play, RotateCw, Sparkles, Trash2, Upload, X } from "lucide-react";
 import { App, Button, Image, Input, Tag, Tooltip, Typography } from "antd";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -22,13 +22,15 @@ import {
   type PipelineRunListResponse,
   type PipelineRunStep,
 } from "@/services/api/pipeline-runs";
+import { fetchMyPipelineBatch } from "@/services/api/pipeline-batches";
 import { useUserStore } from "@/stores/use-user-store";
 
 import { AgentAvatar } from "../../components/agent-avatar";
-import { RUNS_QUERY_KEY } from "../../hooks/use-pipeline-run-manager";
+import { RUNS_QUERY_KEY, resolvePostSourceKeys } from "../../hooks/use-pipeline-run-manager";
 import { usePipelineRunManagerCtx } from "../../components/pipeline-run-manager-context";
 
 const AGENTS_QUERY_KEY = ["my-agents"] as const;
+const BATCHES_QUERY_KEY = ["my-pipeline-batches"] as const;
 
 export default function PipelineRunDetailPage() {
   const params = useParams();
@@ -63,11 +65,43 @@ function PipelineRunDetail({ runId }: { runId: string }) {
   const agents = agentsQuery.data?.items || [];
   const run = runQuery.data;
 
+  // 这条 run 属于批次时，返回 / 删除后应回到批次详情页，而不是一律退回 /agents 列表。
+  const backTarget = run?.batchId ? `/agents/batches/${run.batchId}` : "/agents";
+
+  // 后处理（post）run 没有 seedKey，输入来自 sourceRefs —— 指向同批次各主条的某步产物。
+  // 详情页只拉了自己这一条 run，解析 sourceRefs 需要同批次的 main runs，所以这里按需再拉一次批次详情。
+  const isPostRun = run?.kind === "post";
+  const batchQuery = useQuery({
+    queryKey: [...BATCHES_QUERY_KEY, run?.batchId],
+    queryFn: () => fetchMyPipelineBatch(token, run!.batchId),
+    enabled: Boolean(token && isPostRun && run?.batchId),
+  });
+  // post run 的数据源缩略图（解析失败 / 主条未完成时为空数组）。
+  const postSourceKeys = useMemo(() => {
+    if (!run || !isPostRun) return [];
+    return resolvePostSourceKeys(run.sourceRefs || [], batchQuery.data?.mainRuns || []);
+  }, [run, isPostRun, batchQuery.data]);
+
+  // 直接深链进 post run 详情时，list cache 里没有同批次的 main runs，
+  // 解析数据源 / 在本页「重做」这一步都需要它们。把拉到的批次主条合并进 list cache。
+  // 只并 mainRuns，不动 postRuns，避免覆盖本页对当前 post run 的乐观编辑。
+  useEffect(() => {
+    const mains = batchQuery.data?.mainRuns;
+    if (!mains || mains.length === 0) return;
+    queryClient.setQueryData<PipelineRunListResponse>(RUNS_QUERY_KEY, (old) => {
+      if (!old) return { items: mains, total: mains.length };
+      const map = new Map(old.items.map((r) => [r.id, r]));
+      for (const r of mains) map.set(r.id, r);
+      const items = Array.from(map.values());
+      return { ...old, items, total: items.length };
+    });
+  }, [batchQuery.data, queryClient]);
+
   const [downloading, setDownloading] = useState(false);
 
   const deleteMutation = useMutation({
     mutationFn: () => deleteMyPipelineRun(token, runId),
-    onSuccess: () => router.push("/agents"),
+    onSuccess: () => router.push(backTarget),
     onError: (error) => message.error(error instanceof Error ? error.message : "删除失败"),
   });
 
@@ -191,7 +225,7 @@ function PipelineRunDetail({ runId }: { runId: string }) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-stone-500">
         <p>{runQuery.error instanceof Error ? runQuery.error.message : "执行流程不存在"}</p>
-        <Button onClick={() => router.push("/agents")}>返回列表</Button>
+        <Button onClick={() => router.push(backTarget)}>返回列表</Button>
       </div>
     );
   }
@@ -214,7 +248,7 @@ function PipelineRunDetail({ runId }: { runId: string }) {
     <main className="thin-scrollbar mx-auto h-full w-full max-w-[1600px] overflow-y-auto p-4 lg:p-6">
       {/* 顶栏 */}
       <header className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-stone-200 bg-card p-3 shadow-sm dark:border-stone-800">
-        <Button icon={<ArrowLeft className="size-4" />} onClick={() => router.push("/agents")}>返回</Button>
+        <Button icon={<ArrowLeft className="size-4" />} onClick={() => router.push(backTarget)}>返回</Button>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <Typography.Title level={4} className="!mb-0 !text-base sm:!text-lg">{run.pipelineName || "未命名流水线"}</Typography.Title>
@@ -234,9 +268,13 @@ function PipelineRunDetail({ runId }: { runId: string }) {
         </div>
       </header>
 
-      {/* 原图 + 步骤链 */}
+      {/* 原图 / 数据源 + 步骤链 */}
       <div className="hover-scrollbar flex items-start gap-3 overflow-x-auto pb-4">
-        <SeedThumb seedKey={run.seedKey} />
+        {isPostRun ? (
+          <PostSourcePanel keys={postSourceKeys} loading={batchQuery.isLoading} />
+        ) : (
+          <SeedThumb seedKey={run.seedKey} />
+        )}
         {run.steps.map((step, index) => (
           <span key={step.stepId} className="flex shrink-0 items-stretch gap-3">
             <ChevronRight className="mt-12 size-5 shrink-0 text-stone-400" />
@@ -245,6 +283,7 @@ function PipelineRunDetail({ runId }: { runId: string }) {
               step={step}
               run={run}
               agents={agents}
+              postSourceKeys={isPostRun && index === 0 ? postSourceKeys : undefined}
               disabled={isRunning}
               onChangeExtraNote={(next) => patchRun((current) => ({
                 ...current,
@@ -291,11 +330,48 @@ function SeedThumb({ seedKey }: { seedKey: string }) {
   );
 }
 
+// 后处理 run 的「数据源」面板：取代 SeedThumb。post run 没有单张 seed，输入是同批次多条主条产物，
+// 这里把解析出来的 N 张数据源缩略图竖排列出来（可点击放大、左右切换）。
+function PostSourcePanel({ keys, loading }: { keys: string[]; loading: boolean }) {
+  return (
+    <div className="flex w-[180px] shrink-0 flex-col gap-2 rounded-lg border border-stone-200 bg-card p-3 dark:border-stone-800">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-stone-500 dark:text-stone-400">数据源</span>
+        <span className="text-[11px] text-stone-400">{keys.length} 张</span>
+      </div>
+      {loading ? (
+        <div className="flex h-32 items-center justify-center rounded-md border border-dashed border-stone-300 text-xs text-stone-400 dark:border-stone-700">加载中…</div>
+      ) : keys.length ? (
+        <Image.PreviewGroup>
+          <div className="thin-scrollbar grid max-h-[360px] grid-cols-2 gap-2 overflow-y-auto">
+            {keys.map((key, idx) => (
+              <Image
+                key={`${key}-${idx}`}
+                src={imageUrl(key)}
+                alt={`数据源 ${idx + 1}`}
+                className="!aspect-square !w-full rounded-md object-cover"
+                rootClassName="!block cursor-zoom-in"
+                preview={{ mask: false }}
+              />
+            ))}
+          </div>
+        </Image.PreviewGroup>
+      ) : (
+        <div className="flex h-32 items-center justify-center rounded-md border border-dashed border-stone-300 px-2 text-center text-[11px] text-amber-600 dark:border-stone-700 dark:text-amber-400">
+          暂未解析到可用数据源（主条未完成 / 角色已删除）
+        </div>
+      )}
+    </div>
+  );
+}
+
 type RunStepCardProps = {
   index: number;
   step: PipelineRunStep;
   run: PipelineRun;
   agents: Agent[];
+  // 仅 post run 的第一步：解析出来的多张数据源 storageKey。传了就用「数据源」展示，不走单图 inputKey 那套。
+  postSourceKeys?: string[];
   disabled?: boolean;
   onChangeExtraNote: (next: string) => void;
   onChangeAgent: (agentId: string) => void;
@@ -307,11 +383,16 @@ type RunStepCardProps = {
 
 // run 详情页里每步的卡片。比模板里复杂得多：要展示输入图 / 输出图 / 状态 / 错误 / 重做按钮 / 替换输入等。
 // 不复用 PipelineStepCard（那个是为 PipelineMode 的本地 StepRuntime 设计的，类型不一致）；这里跟 PipelineRunStep 直接对接。
-function RunStepCard({ index, step, run, agents, disabled, onChangeExtraNote, onChangeAgent, onUploadOverride, onClearOverride, onRunSingle, onContinueFrom }: RunStepCardProps) {
+function RunStepCard({ index, step, run, agents, postSourceKeys, disabled, onChangeExtraNote, onChangeAgent, onUploadOverride, onClearOverride, onRunSingle, onContinueFrom }: RunStepCardProps) {
   const { message } = App.useApp();
   const token = useUserStore((state) => state.token);
   const uploadWithToast = useImageUploader();
   const overrideInputRef = useRef<HTMLInputElement>(null);
+
+  // post run 第一步：输入是多张数据源（来自同批次主条产物），不走 seed / 手动覆盖那套。
+  const isPostSource = Array.isArray(postSourceKeys);
+  // 「是否有可用输入」用来 gate 运行按钮：post run 看数据源是否解析到，普通步看单张 inputKey。
+  const hasInput = isPostSource ? postSourceKeys!.length > 0 : Boolean(inputKey);
 
   // 计算当前输入 key（前端独立算一份，跟后端 runner 一致）
   const inputKey = step.manualOverrideKey
@@ -424,38 +505,62 @@ function RunStepCard({ index, step, run, agents, disabled, onChangeExtraNote, on
       </div>
       <div className="flex justify-end">{statusPill}</div>
 
-      {/* 输入图 */}
-      <div className="flex gap-2 rounded-md border border-stone-200 p-2 dark:border-stone-800">
-        <div className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded bg-stone-50 dark:bg-stone-900">
-          {inputKey ? (
-            <img src={imageUrl(inputKey)} alt="本步输入" className="size-full object-cover" />
+      {/* 输入：post run 第一步走「数据源 N 张」，普通步走单张输入图 + 替换输入 */}
+      {isPostSource ? (
+        <div className="rounded-md border border-stone-200 p-2 dark:border-stone-800">
+          <div className="mb-1.5 text-[11px] text-stone-500 dark:text-stone-400">数据源 {postSourceKeys!.length} 张（来自主条产物）</div>
+          {postSourceKeys!.length ? (
+            <Image.PreviewGroup>
+              <div className="flex flex-wrap gap-1">
+                {postSourceKeys!.map((key, idx) => (
+                  <Image
+                    key={`${key}-${idx}`}
+                    src={imageUrl(key)}
+                    alt={`数据源 ${idx + 1}`}
+                    className="!size-12 rounded border border-stone-200 object-cover dark:border-stone-800"
+                    rootClassName="!block !size-12 shrink-0 cursor-zoom-in"
+                    preview={{ mask: false }}
+                  />
+                ))}
+              </div>
+            </Image.PreviewGroup>
           ) : (
-            <span className="text-[10px] text-stone-400">无</span>
+            <div className="py-2 text-[11px] text-amber-600 dark:text-amber-400">暂未解析到可用数据源（主条未完成 / 角色已删除）</div>
           )}
         </div>
-        <div className="flex min-w-0 flex-1 flex-col justify-between">
-          <div className="flex items-center gap-1 text-[11px] text-stone-500 dark:text-stone-400">
-            {inputSource === "manual" ? <Pencil className="size-3 text-amber-500" /> : null}
-            <span>{inputSource === "manual" ? "手动替换" : inputSource === "seed" ? "来自原图" : `来自步骤 ${index}`}</span>
+      ) : (
+        <div className="flex gap-2 rounded-md border border-stone-200 p-2 dark:border-stone-800">
+          <div className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded bg-stone-50 dark:bg-stone-900">
+            {inputKey ? (
+              <img src={imageUrl(inputKey)} alt="本步输入" className="size-full object-cover" />
+            ) : (
+              <span className="text-[10px] text-stone-400">无</span>
+            )}
           </div>
-          <div className="flex flex-wrap gap-1">
-            <Button size="small" disabled={disabled} icon={<Upload className="size-3" />} onClick={() => overrideInputRef.current?.click()}>{step.manualOverrideKey ? "换张图" : "替换输入"}</Button>
-            {step.manualOverrideKey ? <Button size="small" type="text" disabled={disabled} onClick={onClearOverride}>用上游</Button> : null}
+          <div className="flex min-w-0 flex-1 flex-col justify-between">
+            <div className="flex items-center gap-1 text-[11px] text-stone-500 dark:text-stone-400">
+              {inputSource === "manual" ? <Pencil className="size-3 text-amber-500" /> : null}
+              <span>{inputSource === "manual" ? "手动替换" : inputSource === "seed" ? "来自原图" : `来自步骤 ${index}`}</span>
+            </div>
+            <div className="flex flex-wrap gap-1">
+              <Button size="small" disabled={disabled} icon={<Upload className="size-3" />} onClick={() => overrideInputRef.current?.click()}>{step.manualOverrideKey ? "换张图" : "替换输入"}</Button>
+              {step.manualOverrideKey ? <Button size="small" type="text" disabled={disabled} onClick={onClearOverride}>用上游</Button> : null}
+            </div>
+            <input
+              ref={overrideInputRef}
+              type="file"
+              accept="image/*"
+              style={{ display: "none" }}
+              tabIndex={-1}
+              aria-hidden
+              onChange={(event) => {
+                void handleOverrideFile(event.target.files?.[0]);
+                event.target.value = "";
+              }}
+            />
           </div>
-          <input
-            ref={overrideInputRef}
-            type="file"
-            accept="image/*"
-            style={{ display: "none" }}
-            tabIndex={-1}
-            aria-hidden
-            onChange={(event) => {
-              void handleOverrideFile(event.target.files?.[0]);
-              event.target.value = "";
-            }}
-          />
         </div>
-      </div>
+      )}
 
       <Input.TextArea
         value={step.extraNote}
@@ -490,7 +595,7 @@ function RunStepCard({ index, step, run, agents, disabled, onChangeExtraNote, on
           <Button
             type="primary"
             size="small"
-            disabled={disabled || !agentExists || !inputKey}
+            disabled={disabled || !agentExists || !hasInput}
             icon={runIcon}
             onClick={onRunSingle}
           >
