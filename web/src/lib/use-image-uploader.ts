@@ -34,9 +34,10 @@ export function useImageUploader() {
     async (input: string | Blob, options: UploadOptions = {}): Promise<UploadedImage> => {
       const label = options.label?.trim() || "图片";
       const key = `upload-${++counterRef.current}-${Date.now()}`;
-      // 压缩时间通常 0.3-1.5s，让用户看到「正在处理图片…」避免以为卡死；
-      // 压完进上传阶段再换文案。
-      message.loading({ content: `正在处理${label}…`, key, duration: 0 });
+      // 压缩时间通常 0.3-1.5s，让用户看到「正在自动压缩…」避免以为卡死，同时明确告知会做压缩；
+      // 压完进上传阶段再换文案。skipCompress 时不显示压缩字样。
+      const processingText = options.skipCompress ? `正在处理${label}…` : `正在自动压缩${label}…`;
+      message.loading({ content: processingText, key, duration: 0 });
       try {
         // 1. 自动压缩（除非显式 skip）
         const toUpload = options.skipCompress

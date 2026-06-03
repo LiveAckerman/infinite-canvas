@@ -103,7 +103,7 @@ export function AgentEditModal({ open, editing, onClose, onSubmit, submitting }:
                   <Button size="small" type="text" onClick={() => form.setFieldValue("avatarUrl", "")}>用名字首字</Button>
                 ) : null}
               </div>
-              <span className="text-xs text-stone-500 dark:text-stone-400">不上传则用名字首字 + 自动配色作为头像</span>
+              <span className="text-xs text-stone-500 dark:text-stone-400">不上传则用名字首字 + 自动配色作为头像；大图会自动压缩，放心传原图</span>
             </div>
             <input
               ref={fileInputRef}

@@ -22,6 +22,10 @@ const INITIAL_QUALITY = 0.95;
 // 小于这个体积 / 像素的图不做压缩（小图压完反而可能更大、还浪费 CPU + 损失清晰度）。
 const SKIP_IF_SMALLER_THAN = 500 * 1024;
 
+// 给用户看的标准压缩说明文案（页面上常驻提示用），所有上传入口共用这一句话，
+// 不要在各页面里再各自拼，避免参数调整后多处文案漂移。
+export const COMPRESS_HINT_TEXT = "大于 500KB 的图会自动压缩到 4MB 内（长边 2048px），保持画质清晰";
+
 // PNG 带透明通道时保留 PNG（避免丢 alpha）；其它一律转 JPEG，体积小很多。
 function pickOutputType(mimeType: string): string {
   if (mimeType === "image/png") return "image/png";

@@ -4,6 +4,7 @@ import { ClipboardPaste, Image as ImageIcon, Plus, Trash2, Upload } from "lucide
 import { App, Button, Image } from "antd";
 import { useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type ReactNode } from "react";
 
+import { COMPRESS_HINT_TEXT } from "@/lib/compress-image";
 import { useImageUploader } from "@/lib/use-image-uploader";
 import { imageUrl } from "@/services/image-storage";
 
@@ -26,6 +27,8 @@ type ReferenceImagesFieldProps = {
   emptyText?: string;
   // 缩略图边长（px），默认 104。
   thumbSize?: number;
+  // 是否在底部显示「会自动压缩」常驻提示，默认显示。Form.Item 已经有 extra 写了说明时可关掉避免重复。
+  showCompressHint?: boolean;
   className?: string;
 };
 
@@ -42,6 +45,7 @@ export function ReferenceImagesField({
   title,
   emptyText,
   thumbSize = 104,
+  showCompressHint = true,
   className = "",
 }: ReferenceImagesFieldProps) {
   const { message } = App.useApp();
@@ -247,6 +251,11 @@ export function ReferenceImagesField({
           </div>
         ) : null}
       </div>
+
+      {showCompressHint ? (
+        // 让用户明确知道大图会被自动压缩，放心传清晰度高的原图，不用担心传太大被拒
+        <div className="mt-1.5 text-xs text-stone-500 dark:text-stone-400">{COMPRESS_HINT_TEXT}</div>
+      ) : null}
 
       <input
         ref={fileInputRef}
