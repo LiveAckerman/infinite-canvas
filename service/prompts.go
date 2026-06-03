@@ -136,8 +136,23 @@ func SavePrompt(item model.Prompt) (model.Prompt, error) {
 	return repository.SavePrompt(item)
 }
 
+// DeletePrompt 删除提示词（admin 后台调用）。
+// 删完后清理 cover_url 指向的图床图（如果别处不再引用）。
 func DeletePrompt(id string) error {
-	return repository.DeletePrompt(id)
+	saved, ok, _ := repository.GetPromptByID(id)
+	if err := repository.DeletePrompt(id); err != nil {
+		return err
+	}
+	if ok {
+		keySet := map[string]bool{}
+		extractImageKeysFromString(saved.CoverURL, keySet)
+		keys := make([]string, 0, len(keySet))
+		for k := range keySet {
+			keys = append(keys, k)
+		}
+		CleanupImagesByKeysIfOrphanAdmin(keys)
+	}
+	return nil
 }
 
 func promptCategoryCodes(items []model.PromptCategory) []string {

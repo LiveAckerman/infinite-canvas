@@ -300,6 +300,47 @@ func CleanupOrphanImages() (count int, freedBytes int64, err error) {
 	return count, freedBytes, nil
 }
 
+// CleanupImagesByKeysIfOrphanAdmin 跟 CleanupImagesByKeysIfOrphan 一样的扫描 +
+// orphan 判定逻辑，但**不**做 owner 校验。给 admin 删公开素材 / 删提示词 / 删用户
+// 这类「该资源没有明确 user 归属」或「跨用户操作」的路径用。
+//
+// 仍然走 in-use 扫描，被任何业务表引用的图就保留；只有真孤儿才会被物理删除。
+func CleanupImagesByKeysIfOrphanAdmin(keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	uniq := map[string]bool{}
+	pending := make([]string, 0, len(keys))
+	for _, k := range keys {
+		k = strings.TrimSpace(k)
+		if k == "" || uniq[k] {
+			continue
+		}
+		uniq[k] = true
+		pending = append(pending, k)
+	}
+	if len(pending) == 0 {
+		return
+	}
+	inUse, err := CollectInUseImageKeys()
+	if err != nil {
+		log.Printf("cleanup keys (admin): collect in-use failed: %v", err)
+		return
+	}
+	for _, key := range pending {
+		if inUse[key] {
+			continue
+		}
+		image, ok, err := repository.GetImageByID(key)
+		if err != nil || !ok {
+			continue
+		}
+		if err := deleteImageInternal(image); err != nil {
+			log.Printf("cleanup image %s (admin) failed: %v", key, err)
+		}
+	}
+}
+
 // CleanupImagesByKeysIfOrphan 给定一批可能成为孤儿的 storageKey（通常是某条业务记录
 // 刚被删除时它引用过的图），扫一遍 in-use 集合，对其中**已不在**引用里的执行删除。
 // 通过 owner 校验（只删属于该用户的图），多了一层防御。

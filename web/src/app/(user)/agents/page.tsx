@@ -427,7 +427,8 @@ function AgentsWorkbench() {
       okText: "删除",
       okButtonProps: { danger: true },
       cancelText: "取消",
-      onOk: () => deleteBatchMutation.mutate(id),
+      // mutateAsync 让 antd Modal 自动转 loading；.catch 让失败时 modal 也能关掉
+      onOk: () => deleteBatchMutation.mutateAsync(id).catch(() => undefined),
     });
   };
 

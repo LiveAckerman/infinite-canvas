@@ -298,7 +298,9 @@ export function PipelineMode({ agents }: Props) {
       okText: "删除",
       okButtonProps: { danger: true },
       cancelText: "取消",
-      onOk: () => deleteRunMutation.mutate(run.id),
+      // mutateAsync 返回 Promise，antd Modal 会自动在 OK 按钮上转 loading；
+      // .catch 让 mutation 失败时 modal 也能关掉（错误已由 onError 弹 toast）。
+      onOk: () => deleteRunMutation.mutateAsync(run.id).catch(() => undefined),
     });
   };
 
@@ -508,7 +510,7 @@ export function PipelineMode({ agents }: Props) {
           setTemplateModalOpen(true);
         }}
         onDuplicate={(pipeline) => void handleTemplateDuplicate(pipeline)}
-        onDelete={(pipeline) => deleteTemplateMutation.mutate(pipeline.id)}
+        onDelete={(pipeline) => deleteTemplateMutation.mutateAsync(pipeline.id)}
       />
 
       <PipelineTemplateModal

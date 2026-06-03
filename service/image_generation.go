@@ -43,6 +43,7 @@ const (
 	imageGenMaxRunningPerUser  = 5  // 单用户同时进行的生图任务上限
 	imageGenReferenceLimit     = 9  // 图生图参考图上限，跟 handler.editsJSONReferenceLimit 一致
 	imageGenUpstreamMaxAttempt = 3
+	imageGenMaxStall           = 3 // worker 连续多少轮「没有任何进展」就强制收敛终态，避免死循环空转
 )
 
 var imageGenRetryBackoff = []time.Duration{2 * time.Second, 4 * time.Second}
@@ -109,8 +110,11 @@ func StartImageGeneration(userID string, in StartGenerationInput) (model.Generat
 	}
 
 	if in.ID == "" {
-		running, err := repository.CountUserGenerationsByStatus(userID, string(model.GenerationStatusRunning))
-		if err == nil && running >= imageGenMaxRunningPerUser {
+		// 计数检查 + 建记录 + 起 worker 整段放进锁，避免并发 /run 都看到未超限而突破上限。
+		imageGenMu.Lock()
+		running, cntErr := repository.CountUserGenerationsByStatus(userID, string(model.GenerationStatusRunning))
+		if cntErr == nil && running >= imageGenMaxRunningPerUser {
+			imageGenMu.Unlock()
 			return model.Generation{}, errors.New("你有较多生图任务正在进行，请等它们完成后再发起")
 		}
 		gen := model.Generation{
@@ -140,9 +144,14 @@ func StartImageGeneration(userID string, in StartGenerationInput) (model.Generat
 		}
 		saved, err := repository.SaveGeneration(gen)
 		if err != nil {
+			imageGenMu.Unlock()
 			return model.Generation{}, err
 		}
-		ensureImageGenWorker(saved.ID)
+		if !imageGenJobs[saved.ID] {
+			imageGenJobs[saved.ID] = true
+			go runImageGenWorker(saved.ID)
+		}
+		imageGenMu.Unlock()
 		return saved, nil
 	}
 
@@ -282,8 +291,9 @@ func ensureImageGenWorker(genID string) {
 // 循环结构允许「跑的过程中又追加 / 重试」时本 worker 接着把新增槽也跑掉（trigger 见 worker 已注册就不再起第二个）。
 func runImageGenWorker(genID string) {
 	start := time.Now()
+	stall := 0
 	for {
-		// —— 锁内：算待跑槽数 + 快照本轮要用的参数；待跑为 0 则收敛终态并注销，原子完成。
+		// —— 锁内：算待跑槽数 + 快照本轮要用的参数；待跑为 0（或连续多轮无进展）则收敛终态并注销，原子完成。
 		imageGenMu.Lock()
 		gen, ok, err := repository.GetGenerationByID(genID)
 		if err != nil || !ok {
@@ -292,7 +302,7 @@ func runImageGenWorker(genID string) {
 			return
 		}
 		todo := gen.Count - len(gen.Thumbnails) - len(gen.Errors)
-		if todo <= 0 {
+		if todo <= 0 || stall >= imageGenMaxStall {
 			finalizeImageGenRecord(&gen, start)
 			_, _ = repository.SaveGeneration(gen)
 			logImageGenConsume(gen)
@@ -300,6 +310,7 @@ func runImageGenWorker(genID string) {
 			imageGenMu.Unlock()
 			return
 		}
+		before := len(gen.Thumbnails) + len(gen.Errors)
 		snapshot := gen
 		imageGenMu.Unlock()
 
@@ -311,75 +322,92 @@ func runImageGenWorker(genID string) {
 		}
 		isAdmin := isUserAdmin(snapshot.UserID)
 
-		// —— 锁外：并行跑 todo 个槽（受全局信号量约束）。每个槽各自完成后加锁追加结果。
+		// —— 锁外：并行跑 todo 个槽。先占全局信号量再起 goroutine，把同时存活的 slot goroutine 数
+		// 也压在 imageGenMaxConcurrentSlots 以内（否则高并发下会一次性 fork 出大量阻塞 goroutine）。
 		var wg sync.WaitGroup
 		for i := 0; i < todo; i++ {
+			imageGenSem <- struct{}{}
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				defer func() { <-imageGenSem }()
 				runImageGenSlot(snapshot, cfg, isAdmin)
 			}()
 		}
 		wg.Wait()
-		// 回到循环：重算 todo（应为 0）→ 收敛终态返回。
+
+		// 无进展检测：这一轮跑完后 thumbnails+errors 没增加（极端情况，如 DB 持续异常），
+		// 累计 stall，连续 imageGenMaxStall 轮后强制收敛终态，避免无 sleep 的死循环空转。
+		after := before
+		if cur, ok2, _ := repository.GetGenerationByID(genID); ok2 {
+			after = len(cur.Thumbnails) + len(cur.Errors)
+		}
+		if after <= before {
+			stall++
+			time.Sleep(500 * time.Millisecond)
+		} else {
+			stall = 0
+		}
 	}
 }
 
-// runImageGenSlot 跑单张：扣费 → 调上游 → 解码 → 落盘 → 加锁追加 thumbnail / error。
+// runImageGenSlot 跑单张：余额预检 → 调上游 → 解码 → 落盘 → 记产物成功后再扣费。
+// 关键：扣费放在「产物已写进记录」之后——这样 ① 写库失败不会扣了费却丢图（删掉孤儿图、不扣、下轮重试）；
+// ② 服务重启恢复时，已记录的产物不会被重跑/重复扣费，只补跑没记录的槽（彻底消除「恢复重复扣费」）。
+// 并发额度信号量由调用方（worker）持有，这里不再 acquire。
 func runImageGenSlot(gen model.Generation, cfg model.AIConfig, isAdmin bool) {
-	imageGenSem <- struct{}{}
-	defer func() { <-imageGenSem }()
-
+	// 余额预检：耗尽就不再生成（非原子，最坏在余额跨 0 的瞬间放行并发数张「赠送图」，可接受且偏向用户）。
 	if !isAdmin {
-		if _, ok, err := ConsumeCredits(gen.UserID, 1); err != nil || !ok {
+		if u, ok, err := repository.GetUserByID(gen.UserID); err != nil || !ok || u.Credits <= 0 {
 			appendImageGenErrors(gen.ID, "额度不足，请联系管理员", 1)
 			return
 		}
 	}
-	refund := func() {
-		if !isAdmin {
-			if _, err := RefundCredits(gen.UserID, 1); err != nil {
-				log.Printf("image gen refund failed user=%s err=%v", gen.UserID, err)
-			}
-		}
-	}
-
 	raw, status, err := imageGenUpstream(context.Background(), cfg, gen)
 	if err != nil {
-		refund()
 		appendImageGenErrors(gen.ID, err.Error(), 1)
 		return
 	}
 	if status < 200 || status >= 300 {
-		refund()
 		appendImageGenErrors(gen.ID, imageGenFriendlyError(raw, status), 1)
 		return
 	}
 	data, mime, err := extractFirstImageBytes(raw)
 	if err != nil {
-		refund()
 		appendImageGenErrors(gen.ID, err.Error(), 1)
 		return
 	}
 	saved, err := SaveImage(gen.UserID, data, mime)
 	if err != nil {
-		refund()
 		appendImageGenErrors(gen.ID, "图片保存失败："+err.Error(), 1)
 		return
 	}
-	appendImageGenThumbnail(gen.ID, saved.ID, imageGenRedactMeta(raw))
+	// 先把产物记进记录；记录成功后才扣费。记录失败 → 删掉刚存的孤儿图、不扣费，留给下一轮重试（不会重复扣）。
+	if err := appendImageGenThumbnail(gen.ID, saved.ID, imageGenRedactMeta(raw)); err != nil {
+		_ = DeleteImage(gen.UserID, saved.ID)
+		return
+	}
+	if !isAdmin {
+		// 产物已记录，这里扣费失败（并发把余额扣到 0）就当这张赠送，不回滚产物。
+		if _, ok, _ := ConsumeCredits(gen.UserID, 1); !ok {
+			log.Printf("image gen consume after success failed (gifted) user=%s gen=%s", gen.UserID, gen.ID)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
 // 记录读改写（统一在 imageGenMu 下）
 // ---------------------------------------------------------------------------
 
-func appendImageGenThumbnail(genID, imageID, upstreamMeta string) {
+func appendImageGenThumbnail(genID, imageID, upstreamMeta string) error {
 	imageGenMu.Lock()
 	defer imageGenMu.Unlock()
 	gen, ok, err := repository.GetGenerationByID(genID)
-	if err != nil || !ok {
-		return
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("生成记录不存在")
 	}
 	gen.Thumbnails = append(gen.Thumbnails, imageID)
 	gen.SuccessCount = len(gen.Thumbnails)
@@ -388,7 +416,9 @@ func appendImageGenThumbnail(genID, imageID, upstreamMeta string) {
 	}
 	if _, err := repository.SaveGeneration(gen); err != nil {
 		log.Printf("image gen append thumbnail failed gen=%s err=%v", genID, err)
+		return err
 	}
+	return nil
 }
 
 func appendImageGenErrors(genID, msg string, n int) {
@@ -417,8 +447,13 @@ func finalizeImageGenRecord(gen *model.Generation, start time.Time) {
 	if fail < 0 {
 		fail = 0
 	}
+	// 补齐 errors 到 fail 数量：被中断的槽 / 旧遗留 running 记录可能 errors 比应失败数少。
+	// 补齐后「失败卡数量 == errors 数量 == FailCount」，前端不会出幽灵卡、重试也能正确定位（走删 error 分支）。
+	for len(gen.Errors) < fail {
+		gen.Errors = append(gen.Errors, "生成被中断")
+	}
 	gen.SuccessCount = success
-	gen.FailCount = fail
+	gen.FailCount = len(gen.Errors)
 	switch {
 	case success > 0 && fail == 0:
 		gen.Status = model.GenerationStatusSuccess
@@ -692,14 +727,21 @@ func isUserAdmin(userID string) bool {
 }
 
 // isBackendJob 判断这条 running 记录是不是新流程（后端任务化）创建的，用于启动恢复时区分老遗留记录。
+// 容忍各种 truthy 形态（bool / 数字 1 / 字符串 "true"/"1"）——RequestParams 经 JSON 往返、
+// 又能被通用 SaveMyGeneration 接口写入任意客户端 JSON，硬卡 bool 会让真·后台任务被误判成遗留记录而被收敛。
 func isBackendJob(gen model.Generation) bool {
 	if gen.RequestParams == nil {
 		return false
 	}
-	v, ok := gen.RequestParams["backendJob"]
-	if !ok {
-		return false
+	switch v := gen.RequestParams["backendJob"].(type) {
+	case bool:
+		return v
+	case float64:
+		return v != 0
+	case int:
+		return v != 0
+	case string:
+		return v == "true" || v == "1"
 	}
-	b, ok := v.(bool)
-	return ok && b
+	return false
 }

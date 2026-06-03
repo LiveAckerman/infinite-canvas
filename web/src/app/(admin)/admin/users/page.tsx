@@ -60,7 +60,9 @@ export default function AdminUsersPage() {
       okText: "删除",
       okButtonProps: { danger: true },
       cancelText: "取消",
-      onOk: () => deleteUser(user.id),
+      // deleteUser 已是 mutateAsync 返回 Promise，antd Modal 会自动转 OK 按钮 loading；
+      // .catch 让删除失败时 modal 也能关掉（错误已由 mutation onError 弹 toast）
+      onOk: () => deleteUser(user.id).catch(() => undefined),
     });
   };
 

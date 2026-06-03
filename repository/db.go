@@ -46,6 +46,15 @@ func DB() (*gorm.DB, error) {
 		if dbErr != nil {
 			return
 		}
+		// sqlite 单文件不擅长并发写：后端生图任务有多条 goroutine 并发写 generations / images。
+		// 把连接池压到 1 + 设 busy_timeout，等于把所有 DB 访问串行化，彻底杜绝 "database is locked"
+		// （否则写失败被吞会让 worker 反复重跑同一槽、重复扣费）。mysql / postgres 不需要。
+		if driver == "sqlite" {
+			if sqlDB, err := db.DB(); err == nil {
+				sqlDB.SetMaxOpenConns(1)
+			}
+			db.Exec("PRAGMA busy_timeout = 5000")
+		}
 		dbErr = db.AutoMigrate(
 			&model.User{},
 			&model.Prompt{},

@@ -169,9 +169,11 @@ function PipelineRunDetail({ runId }: { runId: string }) {
       title: "删除执行流程",
       content: `确定删除「${run.pipelineName}」吗？删除后无法恢复，关联的图片资源（原图、各步产物）也会一并删除（仍被别处引用的，比如已加入素材库的，会保留）。`,
       okText: "删除",
-      okButtonProps: { danger: true, loading: deleteMutation.isPending },
+      okButtonProps: { danger: true },
       cancelText: "取消",
-      onOk: () => deleteMutation.mutate(),
+      // 返回 Promise 让 antd Modal 自动转 OK 按钮 loading；
+      // 静态 okButtonProps.loading 在 modal.confirm() 调用时已被快照，反应不到 mutation 状态变化。
+      onOk: () => deleteMutation.mutateAsync().catch(() => undefined),
     });
   };
 

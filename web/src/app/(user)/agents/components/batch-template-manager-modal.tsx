@@ -92,7 +92,7 @@ export function BatchTemplateManagerModal({ open, onClose, agents, pipelines }: 
       okText: "删除",
       okButtonProps: { danger: true },
       cancelText: "取消",
-      onOk: () => deleteMutation.mutate(template.id),
+      onOk: () => deleteMutation.mutateAsync(template.id).catch(() => undefined),
     });
   };
 

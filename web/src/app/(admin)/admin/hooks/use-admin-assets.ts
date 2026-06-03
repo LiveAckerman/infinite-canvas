@@ -105,5 +105,6 @@ export function useAdminAssets() {
     refreshAssets,
     saveAsset,
     deleteAsset,
+    isDeleting: deleteMutation.isPending,
   };
 }

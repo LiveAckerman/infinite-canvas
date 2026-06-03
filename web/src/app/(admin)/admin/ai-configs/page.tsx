@@ -109,7 +109,7 @@ export default function AdminAIConfigsPage() {
       okText: "删除",
       okButtonProps: { danger: true },
       cancelText: "取消",
-      onOk: () => deleteConfig(record.id),
+      onOk: () => deleteConfig(record.id).catch(() => undefined),
     });
   };
 

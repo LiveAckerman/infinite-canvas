@@ -271,9 +271,10 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
       title: "删除批量任务",
       content: `确定删除「${detail.batch.name || "未命名批次"}」吗？该批次下所有 main / post run 以及关联的图片资源（原图、各步产物）都会一并删除（仍被别处引用的图片会保留）。`,
       okText: "删除",
-      okButtonProps: { danger: true, loading: deleteMutation.isPending },
+      okButtonProps: { danger: true },
       cancelText: "取消",
-      onOk: () => deleteMutation.mutate(),
+      // mutateAsync 返回 Promise → antd 自动转 OK 按钮 loading；静态 isPending 在 confirm() 调用时已被快照。
+      onOk: () => deleteMutation.mutateAsync().catch(() => undefined),
     });
   };
 
@@ -282,9 +283,9 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
       title: "确定跳过后处理？",
       content: "跳过后所有 post run 会被删除，批次将直接收敛为终态（success / partial / failed）。此操作不可撤销。",
       okText: "跳过后处理",
-      okButtonProps: { danger: true, loading: skipPostMutation.isPending },
+      okButtonProps: { danger: true },
       cancelText: "取消",
-      onOk: () => skipPostMutation.mutate(),
+      onOk: () => skipPostMutation.mutateAsync().catch(() => undefined),
     });
   };
 

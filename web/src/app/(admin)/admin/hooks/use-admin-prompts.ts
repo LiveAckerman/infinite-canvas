@@ -159,6 +159,7 @@ export function useAdminPrompts() {
     refreshPrompts,
     savePrompt: (prompt: Partial<Prompt>) => saveMutation.mutateAsync(prompt),
     deletePrompt: (id: string) => deleteMutation.mutateAsync(id),
+    isDeleting: deleteMutation.isPending,
     reviewPrompt: (id: string, approve: boolean) => reviewMutation.mutateAsync({ id, approve }),
   };
 }

@@ -57,6 +57,7 @@ function MyAssetsPage() {
     changePageSize,
     saveAsset,
     deleteAsset,
+    isDeleting,
   } = useMyAssets();
 
   const [keywordDraft, setKeywordDraft] = useState(keyword);
@@ -299,7 +300,7 @@ function MyAssetsPage() {
 
       <AssetDrawer asset={previewAsset} onClose={() => setPreviewAsset(null)} onCopy={copyText} onDownload={downloadImage} />
 
-      <Modal title="删除素材" open={Boolean(deletingAsset)} onCancel={() => setDeletingAsset(null)} onOk={() => void confirmDelete()} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
+      <Modal title="删除素材" open={Boolean(deletingAsset)} onCancel={() => setDeletingAsset(null)} onOk={() => void confirmDelete()} okText="删除" okButtonProps={{ danger: true, loading: isDeleting }} cancelText="取消" maskClosable={!isDeleting} closable={!isDeleting} cancelButtonProps={{ disabled: isDeleting }}>
         确定删除「{deletingAsset?.title}」吗？删除后会从我的素材中移除，关联的图片资源也会一并删除（仍被别处引用的会保留）。
       </Modal>
     </div>

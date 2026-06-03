@@ -90,6 +90,9 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
   // 刷新 / 切回来都能恢复）。统一用它 gate「开始生成」按钮 / 删除入口 / 微调。
   const running = submitting || previewLog?.status === "running";
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  // 串行删多条生成记录时锁住按钮 + 转 loading；deleteLogMutation.isPending 在循环里会
+  // 短暂 true/false 交替导致按钮闪烁，所以用这个稳定 boolean 包住整个 for 循环。
+  const [deletingLogs, setDeletingLogs] = useState(false);
   // 生成结果（产物图）的删除：多选模式开关 + 已选结果 id。仅 success / missing 这种带图床 key 的结果可删。
   const [resultSelectMode, setResultSelectMode] = useState(false);
   const [selectedResultIds, setSelectedResultIds] = useState<string[]>([]);
@@ -109,6 +112,11 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
     window.localStorage.setItem(LEFT_PANEL_COLLAPSED_KEY, leftPanelCollapsed ? "1" : "0");
   }, [leftPanelCollapsed]);
   const autoPreviewedIdRef = useRef<string | null>(null);
+  // 当前选中的记录 id，在「选择记录」的那一刻同步写入。用来给异步的 setResults / setReferences 把关：
+  // 切换很快时，慢 resolve 的旧记录 promise resolve 后若发现已不是当前选中，就丢弃，避免覆盖串台。
+  const currentPreviewIdRef = useRef<string | null>(null);
+  // 记录上一轮是否有 running 记录，用于「全部 running 都收敛」的下降沿刷新顶栏积分（无论当前看哪条）。
+  const prevAnyRunningRef = useRef(false);
   // isGeneratingRef：发起 /run 请求那一小段置 true，挡住 auto-preview effect 在 URL / 列表缓存
   // 还没同步好的中间态里误把表单回填成别的记录。activeGenerationIdRef：本会话刚发起的记录 id，
   // previewGenerationLog 用它识别「这条 running 是我自己发的」，切回来时不重置表单（结果由轮询刷新）。
@@ -216,13 +224,29 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
       return;
     }
     setPreviewLog(fresh);
-    void deriveResultsFromRecord(fresh).then(setResults);
-    // 任务收敛（不再 running）时刷新顶栏积分——后端按实际出图张数扣费，这里同步显示。
-    if (fresh.status !== "running" && token) {
-      void fetchCurrentUser(token).then((u) => { if (typeof u?.credits === "number") setCredits(u.credits); }).catch(() => {});
-    }
+    currentPreviewIdRef.current = fresh.id;
+    // 异步派生完成后复核仍是当前选中的记录才落地，避免轮询慢 resolve 覆盖用户已切走的记录。
+    void deriveResultsFromRecord(fresh).then((next) => {
+      if (currentPreviewIdRef.current === fresh.id) setResults(next);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [logs]);
+
+  // 顶栏积分刷新：只要用户名下「还有 running 的生图」这件事从 true 变 false（任意任务收敛），
+  // 就拉一次最新余额。这样即便用户已经切走 / 没盯着那条记录，积分也能及时更新。
+  useEffect(() => {
+    const anyRunning = logs.some((item) => item.status === "running");
+    if (prevAnyRunningRef.current && !anyRunning && token) {
+      void fetchCurrentUser(token).then((u) => { if (typeof u?.credits === "number") setCredits(u.credits); }).catch(() => {});
+    }
+    prevAnyRunningRef.current = anyRunning;
+  }, [logs, token, setCredits]);
+
+  // 兜底：previewLog 变化后同步 currentPreviewIdRef（覆盖删除 / 新建等没显式更新它的路径）。
+  // 快速切换的竞态窗口已由 previewGenerationLog / generate / 轮询里的同步赋值处理，这里只是补漏。
+  useEffect(() => {
+    currentPreviewIdRef.current = previewLog?.id ?? null;
+  }, [previewLog]);
 
   // 直接访问 /image/{id} 或在记录列表里点击某条记录后，自动把对应记录展开到右侧。
   // ⚠️ 正在生成（isGeneratingRef）时不能跑这条 effect：generate() 自己会改 URL / logs cache / autoPreviewedIdRef，
@@ -377,10 +401,12 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
       });
       upsertLogCache(record);
       setPreviewLog(record);
+      currentPreviewIdRef.current = record.id;
       activeGenerationIdRef.current = record.id;
       autoPreviewedIdRef.current = record.id;
       // 立即渲染「生成中」占位（count - 已成功 - 已失败 张转圈）；之后由轮询刷新成实际产物。
-      setResults(await deriveResultsFromRecord(record));
+      const derived = await deriveResultsFromRecord(record);
+      if (currentPreviewIdRef.current === record.id) setResults(derived);
       if (!appendId) router.replace(`/image/${record.id}`);
       // 触发列表刷新 → refetchInterval 看到 running 记录后开始 2s 轮询。
       void queryClient.invalidateQueries({ queryKey: ["my-generations"] });
@@ -490,21 +516,26 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
   };
 
   const deleteSelectedLogs = async () => {
-    for (const id of selectedLogIds) {
-      try {
-        await deleteLogMutation.mutateAsync(id);
-      } catch {
-        // mutation onError handles message
+    setDeletingLogs(true);
+    try {
+      for (const id of selectedLogIds) {
+        try {
+          await deleteLogMutation.mutateAsync(id);
+        } catch {
+          // mutation onError handles message
+        }
       }
+      if (previewLog && selectedLogIds.includes(previewLog.id)) {
+        setPreviewLog(null);
+        setResults([]);
+        autoPreviewedIdRef.current = null;
+        router.replace("/image");
+      }
+      setSelectedLogIds([]);
+      setDeleteConfirmOpen(false);
+    } finally {
+      setDeletingLogs(false);
     }
-    if (previewLog && selectedLogIds.includes(previewLog.id)) {
-      setPreviewLog(null);
-      setResults([]);
-      autoPreviewedIdRef.current = null;
-      router.replace("/image");
-    }
-    setSelectedLogIds([]);
-    setDeleteConfirmOpen(false);
   };
 
   // ===== 生成结果（产物图）删除：单张 / 多选 / 全部 =====
@@ -638,17 +669,17 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
 
   const previewGenerationLog = async (log: GenerationRecord, options: { skipNavigate?: boolean } = {}) => {
     setPreviewLog(log);
+    // 同步标记「现在选中的是这条」——后面异步写入前用它把关，防止快切串台。
+    currentPreviewIdRef.current = log.id;
     setLogsOpen(false);
     // 切换查看的记录时退出产物多选态，避免选中项跨记录串台。
     setResultSelectMode(false);
     setSelectedResultIds([]);
 
-    // 如果是当前会话正在跑、或者就是本会话刚发起的那条 placeholder（task 跑完仍可能
-    // 走到 react 重新渲染调到 previewGenerationLog），千万别去重写 results，
-    // 否则 task 还没跑完 / 刚跑完的成功图都会被刷成「生成被中断」误导用户。
-    // 用 ref 而不是 useState 的 running，避免 closure 拿到 stale=false 的 race。
-    const isOwnActiveLog = activeGenerationIdRef.current === log.id;
-    if (log.status === "running" && (isGeneratingRef.current || isOwnActiveLog)) {
+    // 仅在「正在发起 /run 请求」的极短窗口里跳过回填，避免和 generate() 的状态写入打架。
+    // 后端任务化后，记录本身就是真相——即便切回正在生成的记录，也应照常按记录回填表单 + 派生结果
+    // （所以不再用旧的 isOwnActiveLog 守卫把整段跳过，否则切回去右侧结果就不刷新了）。
+    if (isGeneratingRef.current) {
       if (!options.skipNavigate) {
         autoPreviewedIdRef.current = log.id;
         router.replace(`/image/${log.id}`);
@@ -656,31 +687,27 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
       return;
     }
 
-    // 回填这条记录的工作台参数，让左侧表单同步显示。
+    // 回填这条记录的工作台参数（同步，始终用最后一次选择的，不会被异步覆盖）。
     setPrompt(log.prompt);
     updateConfig("count", String(log.count || 1));
     if (log.size) updateConfig("size", log.size);
     if (log.quality) updateConfig("quality", log.quality);
 
-    // 回填参考图：log.references 是 image storageKey 列表
-    if (log.references?.length) {
-      const restored = await Promise.all(log.references.map(async (storageKey, index) => {
-        const url = await resolveImageUrl(storageKey, "");
-        return {
+    // 异步部分：参考图 + 结果都要等图片 resolve；完成后必须复核「现在选中的还是这条」才落地。
+    const restored = log.references?.length
+      ? (await Promise.all(log.references.map(async (storageKey, index) => ({
           id: `${log.id}-ref-${index}`,
           name: `ref-${index + 1}`,
           type: "image/*",
-          dataUrl: url,
+          dataUrl: await resolveImageUrl(storageKey, ""),
           storageKey,
-        } as ReferenceImage;
-      }));
-      setReferences(restored.filter((ref) => ref.dataUrl));
-    } else {
-      setReferences([]);
+        } as ReferenceImage)))).filter((ref) => ref.dataUrl)
+      : [];
+    const derived = await deriveResultsFromRecord(log);
+    if (currentPreviewIdRef.current === log.id) {
+      setReferences(restored);
+      setResults(derived);
     }
-
-    // 右侧「生成结果」区域按记录实时状态渲染：成功图 + 还在生成中的占位（running）+ 失败槽。
-    setResults(await deriveResultsFromRecord(log));
 
     if (!options.skipNavigate) {
       autoPreviewedIdRef.current = log.id;
@@ -896,7 +923,7 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
                     ) : result.status === "missing" ? (
                       <MissingImageCard key={result.id} selectMode={resultSelectMode} selected={selectedResultIds.includes(result.id)} onToggleSelect={() => toggleResultSelected(result.id)} onDelete={running ? undefined : () => confirmDeleteSingleResult(result)} />
                     ) : result.status === "failed" ? (
-                      <FailedImageCard key={result.id} error={result.error || "生成失败"} onRetry={() => void retryResult()} />
+                      <FailedImageCard key={result.id} error={result.error || "生成失败"} onRetry={running ? undefined : () => void retryResult()} />
                     ) : (
                       <PendingImageCard key={result.id} />
                     )
@@ -931,7 +958,7 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
         imageOptions={previewLog?.thumbnails || []}
       />
       <AssetPickerModal open={assetPickerOpen} defaultTab="my-assets" onInsert={(payload) => void insertPickedAsset(payload)} onClose={() => setAssetPickerOpen(false)} />
-      <Modal title="删除生成记录" open={deleteConfirmOpen} onCancel={() => setDeleteConfirmOpen(false)} onOk={() => void deleteSelectedLogs()} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
+      <Modal title="删除生成记录" open={deleteConfirmOpen} onCancel={() => !deletingLogs && setDeleteConfirmOpen(false)} onOk={() => void deleteSelectedLogs()} okText="删除" okButtonProps={{ danger: true, loading: deletingLogs }} cancelText="取消" cancelButtonProps={{ disabled: deletingLogs }} maskClosable={!deletingLogs} closable={!deletingLogs}>
         确定删除选中的 {selectedLogIds.length} 条生成记录吗？关联的图片资源也会一并删除（仍被别处引用的会保留）。
       </Modal>
     </div>
@@ -1056,7 +1083,7 @@ function PendingImageCard() {
   );
 }
 
-function FailedImageCard({ error, onRetry }: { error: string; onRetry: () => void }) {
+function FailedImageCard({ error, onRetry }: { error: string; onRetry?: () => void }) {
   return (
     <div className="overflow-hidden rounded-lg border border-red-200 bg-red-50 dark:border-red-950 dark:bg-red-950/20">
       <div className="flex aspect-square flex-col items-center justify-center gap-3 p-5 text-center">
@@ -1065,9 +1092,12 @@ function FailedImageCard({ error, onRetry }: { error: string; onRetry: () => voi
           {error}
         </Typography.Paragraph>
       </div>
-      <div className="flex justify-end border-t border-red-200 p-3 dark:border-red-950">
-        <Button size="small" danger onClick={onRetry}>重试</Button>
-      </div>
+      {/* 生成进行中时不给「重试」入口（onRetry 为空），避免和正在跑的后台任务打架 */}
+      {onRetry ? (
+        <div className="flex justify-end border-t border-red-200 p-3 dark:border-red-950">
+          <Button size="small" danger onClick={onRetry}>重试</Button>
+        </div>
+      ) : null}
     </div>
   );
 }

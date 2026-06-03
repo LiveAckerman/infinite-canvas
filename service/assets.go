@@ -59,9 +59,24 @@ func SaveMyAsset(userID string, item model.Asset) (model.Asset, error) {
 	return saveAsset(item)
 }
 
-// DeletePublicAsset 删除公开素材，仅管理员后台调用。
+// DeletePublicAsset 删除公开素材（admin 后台调用）。
+// 删完后清理 cover_url / url 指向的图床图（如果别处不再引用）。
 func DeletePublicAsset(id string) error {
-	return repository.DeleteAsset(id)
+	saved, ok, _ := repository.GetAssetByID(id)
+	if err := repository.DeleteAsset(id); err != nil {
+		return err
+	}
+	if ok {
+		keySet := map[string]bool{}
+		extractImageKeysFromString(saved.CoverURL, keySet)
+		extractImageKeysFromString(saved.URL, keySet)
+		keys := make([]string, 0, len(keySet))
+		for k := range keySet {
+			keys = append(keys, k)
+		}
+		CleanupImagesByKeysIfOrphanAdmin(keys)
+	}
+	return nil
 }
 
 // DeleteMyAsset 删除当前用户的私有素材；删完后清理可能被孤立的关联图片。

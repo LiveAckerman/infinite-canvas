@@ -20,7 +20,7 @@ const typeOptions = [
 const editTypeOptions = typeOptions.slice(1);
 
 export default function AdminAssetsPage() {
-  const { assets, tags, keyword, kind, tag, page, pageSize, total, isLoading, searchAssets, changeKind, changeTag, changePage, changePageSize, resetFilters, refreshAssets, saveAsset: saveAdminAsset, deleteAsset } = useAdminAssets();
+  const { assets, tags, keyword, kind, tag, page, pageSize, total, isLoading, searchAssets, changeKind, changeTag, changePage, changePageSize, resetFilters, refreshAssets, saveAsset: saveAdminAsset, deleteAsset, isDeleting } = useAdminAssets();
   const { message } = App.useApp();
   const [form] = Form.useForm<AssetFormValues>();
   const [editingAsset, setEditingAsset] = useState<Partial<AdminAsset> | null>(null);
@@ -155,7 +155,7 @@ export default function AdminAssetsPage() {
         ) : null}
       </Modal>
 
-      <Modal title="删除素材" open={Boolean(deletingAsset)} onCancel={() => setDeletingAsset(null)} onOk={async () => { if (!deletingAsset) return; await deleteAsset(deletingAsset.id); setDeletingAsset(null); }} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
+      <Modal title="删除素材" open={Boolean(deletingAsset)} onCancel={() => !isDeleting && setDeletingAsset(null)} onOk={async () => { if (!deletingAsset) return; await deleteAsset(deletingAsset.id); setDeletingAsset(null); }} okText="删除" okButtonProps={{ danger: true, loading: isDeleting }} cancelText="取消" cancelButtonProps={{ disabled: isDeleting }} maskClosable={!isDeleting} closable={!isDeleting}>
         确定删除「{deletingAsset?.title}」吗？删除后会从服务器素材库中移除。
       </Modal>
     </main>

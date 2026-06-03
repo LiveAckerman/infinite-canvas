@@ -15,7 +15,9 @@ type Props = {
   onNew: () => void;
   onEdit: (pipeline: Pipeline) => void;
   onDuplicate: (pipeline: Pipeline) => void;
-  onDelete: (pipeline: Pipeline) => void;
+  // onDelete 返回 Promise 让 Modal.confirm 的 OK 按钮跟着 await（自动转 loading）；
+  // 调用方一般传 mutation.mutateAsync 转一层 .catch
+  onDelete: (pipeline: Pipeline) => Promise<unknown> | void;
 };
 
 // 「管理流水线模板」Modal：表格 / 列表展示所有模板 + 行内操作。
@@ -30,7 +32,12 @@ export function PipelineTemplateManagerModal({ open, pipelines, agents, loading,
       okText: "删除",
       okButtonProps: { danger: true },
       cancelText: "取消",
-      onOk: () => onDelete(pipeline),
+      onOk: async () => {
+        const result = onDelete(pipeline);
+        if (result && typeof (result as Promise<unknown>).catch === "function") {
+          await (result as Promise<unknown>).catch(() => undefined);
+        }
+      },
     });
   };
 

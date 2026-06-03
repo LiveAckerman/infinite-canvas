@@ -78,6 +78,8 @@ export function useMyAssets() {
     page,
     pageSize,
     isLoading: query.isFetching || saveMutation.isPending || deleteMutation.isPending,
+    // 单独暴露 deleting，让删除确认 Modal 的 OK 按钮能跟着转 loading
+    isDeleting: deleteMutation.isPending,
     searchAssets: (value = keyword) => updateFilters({ keyword: value }),
     changeType: (value: string) => updateFilters({ type: value, tag: [] }),
     changeTag: (value: string[]) => updateFilters({ tag: value }),

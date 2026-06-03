@@ -62,7 +62,9 @@ export default function AdminStoragePage() {
       okText: "确认清理",
       okButtonProps: { danger: true },
       cancelText: "取消",
-      onOk: () => cleanupMutation.mutateAsync(),
+      // mutateAsync 已经返回 Promise → antd Modal OK 按钮自动跟着转 loading；
+      // .catch 让失败时 modal 也能关掉（错误已由 mutation onError 弹 toast）
+      onOk: () => cleanupMutation.mutateAsync().catch(() => undefined),
     });
   };
 

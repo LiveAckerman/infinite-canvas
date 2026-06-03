@@ -10,7 +10,7 @@ import type { Prompt } from "@/services/api/prompts";
 import { useAdminPrompts } from "../hooks/use-admin-prompts";
 
 export default function AdminPromptsPage() {
-  const { categories, prompts, tags, keyword, category, tag, visibility, page, pageSize, total, pendingCount, isLoading, isSyncing, searchPrompts, changeCategory, changeTag, changeVisibility, changePage, changePageSize, resetFilters, refreshPrompts, syncCategory, savePrompt: saveAdminPrompt, deletePrompt, reviewPrompt } = useAdminPrompts();
+  const { categories, prompts, tags, keyword, category, tag, visibility, page, pageSize, total, pendingCount, isLoading, isSyncing, searchPrompts, changeCategory, changeTag, changeVisibility, changePage, changePageSize, resetFilters, refreshPrompts, syncCategory, savePrompt: saveAdminPrompt, deletePrompt, isDeleting, reviewPrompt } = useAdminPrompts();
   const { message } = App.useApp();
   const [form] = Form.useForm<Partial<Prompt> & { tagText?: string }>();
   const [editingPrompt, setEditingPrompt] = useState<Partial<Prompt> | null>(null);
@@ -185,7 +185,7 @@ export default function AdminPromptsPage() {
         />
       </Modal>
 
-      <Modal title="删除提示词" open={Boolean(deletingPrompt)} onCancel={() => setDeletingPrompt(null)} onOk={async () => { if (!deletingPrompt) return; await deletePrompt(deletingPrompt.id); setDeletingPrompt(null); }} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
+      <Modal title="删除提示词" open={Boolean(deletingPrompt)} onCancel={() => !isDeleting && setDeletingPrompt(null)} onOk={async () => { if (!deletingPrompt) return; await deletePrompt(deletingPrompt.id); setDeletingPrompt(null); }} okText="删除" okButtonProps={{ danger: true, loading: isDeleting }} cancelText="取消" cancelButtonProps={{ disabled: isDeleting }} maskClosable={!isDeleting} closable={!isDeleting}>
         确定删除「{deletingPrompt?.title}」吗？删除后会从当前分类中删除。
       </Modal>
     </main>
