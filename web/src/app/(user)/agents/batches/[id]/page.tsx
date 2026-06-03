@@ -3,7 +3,8 @@
 import { AlertTriangle, ArrowLeft, Download, Play, RefreshCw, Trash2 } from "lucide-react";
 import { App, Button, Image, Progress, Tag, Typography } from "antd";
 import { useEffect, useMemo, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
+import { useNav } from "@/lib/use-nav";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { useUserStore } from "@/stores/use-user-store";
@@ -41,7 +42,7 @@ export default function PipelineBatchDetailPage() {
 
 function PipelineBatchDetail({ batchId }: { batchId: string }) {
   const { message, modal } = App.useApp();
-  const router = useRouter();
+  const nav = useNav();
   const queryClient = useQueryClient();
   const token = useUserStore((state) => state.token);
 
@@ -52,6 +53,8 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
   const [downloading, setDownloading] = useState(false);
   // 后处理 run 重做时锁定 button，避免重复点击触发多次 PUT
   const [retryingPostId, setRetryingPostId] = useState<string>("");
+  // 跟 post 那条独立：主条「失败」直接在卡片上点「重试」时给按钮单独 loading 态
+  const [retryingMainId, setRetryingMainId] = useState<string>("");
 
   const batchQuery = useQuery({
     queryKey: [...BATCHES_QUERY_KEY, batchId],
@@ -163,6 +166,43 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
     },
   });
 
+  // 重试单条 failed 主条：跟 handleRetryPostRun 一样的语义（reset run + steps → 写库 → 乐观 cache 更新），
+  // 只是写回的是 mainRuns 而不是 postRuns。调度器订阅 list cache 自动捡起来跑。
+  // 之前批次详情页里失败主条只能点进详情页才能重跑，现在卡片上直接「重试」按钮一键搞定。
+  const handleRetryMainRun = async (run: PipelineRun) => {
+    setRetryingMainId(run.id);
+    try {
+      const next: PipelineRun = {
+        ...run,
+        status: "queued",
+        steps: run.steps.map((step) => ({
+          ...step,
+          status: "idle",
+          outputKey: undefined,
+          errorMessage: undefined,
+          durationMs: undefined,
+          lastRunSnapshot: undefined,
+        })),
+      };
+      const saved = await saveMyPipelineRun(token, next);
+      queryClient.setQueryData<PipelineBatchDetail>([...BATCHES_QUERY_KEY, batchId], (old) => {
+        if (!old) return old;
+        return { ...old, mainRuns: old.mainRuns.map((item) => (item.id === saved.id ? saved : item)) };
+      });
+      queryClient.setQueryData<PipelineRunListResponse>(RUNS_QUERY_KEY, (old) => {
+        if (!old) return { items: [saved], total: 1 };
+        const exists = old.items.some((item) => item.id === saved.id);
+        if (exists) return { ...old, items: old.items.map((item) => (item.id === saved.id ? saved : item)) };
+        return { ...old, items: [...old.items, saved], total: old.total + 1 };
+      });
+      message.success("已重新排队，稍等就会自动开跑");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "重试失败");
+    } finally {
+      setRetryingMainId("");
+    }
+  };
+
   // 重做单条 failed / paused 的 post run：把 run + step 全部 reset 到 queued/idle 写库；
   // 调度器订阅 cache 变化会自动捡起来跑（v0.0.28 起 agents 闭包 race 有 ref + retry 兜底）。
   const handleRetryPostRun = async (run: PipelineRun) => {
@@ -205,7 +245,7 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: BATCHES_QUERY_KEY });
       message.success("已删除批量任务");
-      router.push("/agents");
+      nav.push("/agents");
     },
     onError: (error) => {
       message.error(error instanceof Error ? error.message : "删除失败");
@@ -313,7 +353,7 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
 
   // 跳转到单条 run 详情页
   const openRun = (runId: string) => {
-    router.push(`/agents/runs/${runId}`);
+    nav.push(`/agents/runs/${runId}`);
   };
 
   const mainSummary = useMemo(() => {
@@ -346,7 +386,7 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-stone-500">
         <p>{batchQuery.error instanceof Error ? batchQuery.error.message : "批量任务不存在或已被删除"}</p>
-        <Button onClick={() => router.push("/agents")}>返回列表</Button>
+        <Button onClick={() => nav.push("/agents")}>返回列表</Button>
       </div>
     );
   }
@@ -382,7 +422,7 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
     <main className="thin-scrollbar mx-auto h-full w-full max-w-[1600px] overflow-y-auto p-4 lg:p-6">
       {/* 顶栏 */}
       <header className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-stone-200 bg-card p-3 shadow-sm dark:border-stone-800">
-        <Button icon={<ArrowLeft className="size-4" />} onClick={() => router.push("/agents")}>返回</Button>
+        <Button icon={<ArrowLeft className="size-4" />} onClick={() => nav.push("/agents")}>返回</Button>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <Typography.Title level={4} className="!mb-0 !text-base sm:!text-lg">
@@ -451,14 +491,19 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
                   // 复用单 run 下载入口
                   message.info("请到该主条详情页内下载单条 zip，或在批次终态时使用上方「下载所有产物」打包下载");
                 }}
-                onDelete={() => message.info("批量任务的 main run 不可单独删除，请删除整个批次")}
-                onDuplicate={() => message.info("批量任务的 main run 不支持复制；如需重新跑请在批次列表新建一次")}
+                onDelete={() => {/* hideDelete=true 时按钮不渲染，这里不会触发 */}}
+                onDuplicate={() => {/* hideDuplicate=true 时按钮不渲染，这里不会触发 */}}
                 onSeedUploaded={() => {/* seed 在 batch 创建时已锁定，不再支持替换 */}}
                 onStart={() => {/* 主条单条启动入口走详情页 */}}
                 selected={false}
                 onSelectedChange={() => {/* batch 详情下不提供单条勾选 */}}
                 eligible={false}
                 downloading={false}
+                // 批次模式：失败主条直接卡片上点重试，不用进详情页
+                onRetry={() => void handleRetryMainRun(run)}
+                retrying={retryingMainId === run.id}
+                hideDuplicate
+                hideDelete
               />
             ))}
           </div>

@@ -27,6 +27,14 @@ type Props = {
   // 这条 run 是否「可执行」（=已上传原图 + 处于 paused 待执行）。决定 Checkbox 是否可勾、单卡「执行」按钮是否显示
   eligible: boolean;
   downloading?: boolean;
+  // 批次模式专用：传了 onRetry → 当 run.status === "failed" 时显示「重试」按钮直接重跑（不用点进详情页）。
+  // 不影响 pipeline-mode 调用方（默认 undefined → 没按钮）。
+  onRetry?: () => void;
+  retrying?: boolean;
+  // 批次模式专用：隐藏「复制」按钮（批量主条共享同 batchId，不允许复制成游离的 run）。
+  hideDuplicate?: boolean;
+  // 批次模式专用：隐藏「删除」按钮（批量主条不能单删，要删整个 batch；按钮存在反而误导）。
+  hideDelete?: boolean;
 };
 
 // 「执行流程」列表里的一张卡：勾选 + 名字 + 状态 + 进度缩略图行 + 操作按钮。
@@ -34,7 +42,7 @@ type Props = {
 // run.seedKey 为空时（一般是刚通过 Dropdown 添加或复制出来的新 run，状态=paused），
 // 卡片中部会变成「待上传原图」的拖入/上传 UI；上传完调 onSeedUploaded 让父层 PUT 写回（保持 paused 状态）。
 // 用户点单条「▶ 执行」按钮 / 顶部「执行选中」/「全部执行」时才真正进 queued 让调度器跑。
-export function PipelineRunCard({ run, onOpen, onDownload, onDelete, onDuplicate, onSeedUploaded, onStart, selected, onSelectedChange, eligible, downloading }: Props) {
+export function PipelineRunCard({ run, onOpen, onDownload, onDelete, onDuplicate, onSeedUploaded, onStart, selected, onSelectedChange, eligible, downloading, onRetry, retrying, hideDuplicate, hideDelete }: Props) {
   const { message } = App.useApp();
   const uploadWithToast = useImageUploader();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -150,9 +158,11 @@ export function PipelineRunCard({ run, onOpen, onDownload, onDelete, onDuplicate
             </div>
           </div>
         </div>
-        <Tooltip title="删除该执行流程">
-          <Button size="small" type="text" danger icon={<Trash2 className="size-3.5" />} onClick={onDelete} />
-        </Tooltip>
+        {!hideDelete ? (
+          <Tooltip title="删除该执行流程">
+            <Button size="small" type="text" danger icon={<Trash2 className="size-3.5" />} onClick={onDelete} />
+          </Tooltip>
+        ) : null}
       </div>
 
       {/* 中部：要么是「上传原图」区（待上传时），要么是步骤进度缩略图行 */}
@@ -228,7 +238,21 @@ export function PipelineRunCard({ run, onOpen, onDownload, onDelete, onDuplicate
         {eligible && hasAnyOutput ? (
           <Button icon={<RotateCw className="size-3.5" />} onClick={onStart} title="清空旧产物，从第 1 步重新跑">重新执行</Button>
         ) : null}
-        <Button icon={<Copy className="size-3.5" />} onClick={onDuplicate} title="用同一个模板再起一条新的（需要重新上传原图）">复制</Button>
+        {/* 批次模式专用「重试」：失败主条 + 父层传了 onRetry → 显示。点了清 steps 重跑，不用进详情页 */}
+        {onRetry && run.status === "failed" ? (
+          <Button
+            type="primary"
+            icon={<RotateCw className="size-3.5" />}
+            loading={retrying}
+            onClick={onRetry}
+            title="清空已跑步骤，从第 1 步重新跑这条主条"
+          >
+            重试
+          </Button>
+        ) : null}
+        {!hideDuplicate ? (
+          <Button icon={<Copy className="size-3.5" />} onClick={onDuplicate} title="用同一个模板再起一条新的（需要重新上传原图）">复制</Button>
+        ) : null}
         {!needsSeed && hasAnyOutput ? (
           <Button icon={<Download className="size-3.5" />} loading={downloading} disabled={!canDownload} onClick={onDownload}>下载所有产物 (zip)</Button>
         ) : null}
