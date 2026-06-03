@@ -2,6 +2,7 @@
 
 import { BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, ImageOff, LoaderCircle, PanelLeftClose, PanelLeftOpen, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { useNav } from "@/lib/use-nav";
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { App, AutoComplete, Button, Checkbox, Drawer, Empty, Image, Input, InputNumber, Modal, Select, Tag, Typography } from "antd";
@@ -67,6 +68,9 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
   const { message, modal } = App.useApp();
   const queryClient = useQueryClient();
   const router = useRouter();
+  // 同页 URL 同步（/image -> /image/{id}）继续用 router.replace（不闪进度条）；
+  // 「来自微调」这种跳到另一条记录的导航用 nav，点亮顶部进度条。
+  const nav = useNav();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const config = useAiConfigStore((state) => state.config);
   const updateConfig = useAiConfigStore((state) => state.updateConfig);
@@ -890,7 +894,7 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
                 <div className="flex items-center gap-3">
                   <h2 className="text-xl font-semibold">生成结果</h2>
                   {previewLog?.parentId ? (
-                    <Button size="small" type="link" className="!h-7 !px-2" onClick={() => router.push(`/image/${previewLog.parentId}`)} icon={<Sparkles className="size-3.5" />}>来自微调</Button>
+                    <Button size="small" type="link" className="!h-7 !px-2" onClick={() => nav.push(`/image/${previewLog.parentId}`)} icon={<Sparkles className="size-3.5" />}>来自微调</Button>
                   ) : null}
                 </div>
                 <div className="flex flex-wrap items-center justify-end gap-2">

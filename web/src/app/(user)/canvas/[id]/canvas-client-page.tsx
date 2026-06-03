@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
+import { useNav } from "@/lib/use-nav";
 import { Coins, Home, ImageIcon, Images, Keyboard, List, LogOut, Menu, MessageSquare, Plus, Redo2, Settings2, Trash2, Undo2, Upload } from "lucide-react";
 
 import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
@@ -211,7 +212,7 @@ function InfiniteCanvasPage() {
   const { message } = App.useApp();
   const uploadWithToast = useImageUploader();
   const params = useParams<{ id: string }>();
-  const router = useRouter();
+  const nav = useNav();
   const projectId = params.id;
   const containerRef = useRef<HTMLDivElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -313,7 +314,7 @@ function InfiniteCanvasPage() {
     setProjectLoaded(false);
     const project = openProject(projectId);
     if (!project) {
-      router.replace("/canvas");
+      nav.replace("/canvas");
       return;
     }
 
@@ -342,7 +343,7 @@ function InfiniteCanvasPage() {
       setProjectLoaded(true);
     };
     void restore();
-  }, [openProject, projectId, router, syncStatus]);
+  }, [openProject, projectId, nav, syncStatus]);
 
   useEffect(() => {
     if (!projectLoaded || applyingHistoryRef.current || historyPausedRef.current) return;
@@ -823,8 +824,8 @@ function InfiniteCanvasPage() {
       message.error(error instanceof Error ? error.message : "新建画布失败");
       return;
     }
-    router.push(`/canvas/${id}`);
-  }, [message, router, token]);
+    nav.push(`/canvas/${id}`);
+  }, [message, nav, token]);
 
   const deleteCurrentProject = useCallback(async () => {
     if (token) {
@@ -836,8 +837,8 @@ function InfiniteCanvasPage() {
       }
     }
     deleteProjects([projectId]);
-    router.push("/canvas");
-  }, [deleteProjects, message, projectId, router, token]);
+    nav.push("/canvas");
+  }, [deleteProjects, message, projectId, nav, token]);
 
   const handleCanvasMouseDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1811,7 +1812,7 @@ function InfiniteCanvasPage() {
       <main className="flex h-full items-center justify-center bg-background text-sm text-stone-500">
         <div className="flex flex-col items-center gap-3">
           <span>画布加载失败</span>
-          <Button onClick={() => router.push("/canvas")}>返回画布库</Button>
+          <Button onClick={() => nav.push("/canvas")}>返回画布库</Button>
         </div>
       </main>
     );
@@ -1835,8 +1836,8 @@ function InfiniteCanvasPage() {
           onCancelTitleEditing={() => setTitleEditing(false)}
           canUndo={historyState.canUndo}
           canRedo={historyState.canRedo}
-          onHome={() => router.push("/")}
-          onProjects={() => router.push("/canvas")}
+          onHome={() => nav.push("/")}
+          onProjects={() => nav.push("/canvas")}
           onCreateProject={createAndOpenProject}
           onDeleteProject={() => void deleteCurrentProject()}
           onImportImage={() => handleUploadRequest()}

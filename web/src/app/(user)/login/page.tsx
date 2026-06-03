@@ -5,6 +5,7 @@ import { App, Button, Form, Input } from "antd";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 
+import { useNav } from "@/lib/use-nav";
 import { useUserStore } from "@/stores/use-user-store";
 
 type LoginFormValues = {
@@ -26,6 +27,7 @@ export default function LoginPage() {
 function LoginContent() {
   const { message } = App.useApp();
   const router = useRouter();
+  const nav = useNav();
   const searchParams = useSearchParams();
   const login = useUserStore((state) => state.login);
   const register = useUserStore((state) => state.register);
@@ -36,9 +38,9 @@ function LoginContent() {
 
   const goAfterAuth = (role: string) => {
     if (mode === "login" && role === "admin" && (redirect === "/" || redirect === "")) {
-      router.replace("/admin");
+      nav.replace("/admin");
     } else {
-      router.replace(redirect.startsWith("/") ? redirect : "/");
+      nav.replace(redirect.startsWith("/") ? redirect : "/");
     }
     router.refresh();
   };

@@ -4,7 +4,7 @@ import { FolderCog, History, Layers, Plus, Search } from "lucide-react";
 import { App, Button, Empty, Input, Modal, Tabs, Tag } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRouter } from "next/navigation";
+import { useNav } from "@/lib/use-nav";
 
 import { RequireAuth } from "@/components/require-auth";
 import { deleteMyAgent, fetchMyAgents, saveMyAgent, type Agent, type AgentListResponse } from "@/services/api/agents";
@@ -68,7 +68,7 @@ export default function AgentsPage() {
 function AgentsWorkbench() {
   const { message, modal } = App.useApp();
   const queryClient = useQueryClient();
-  const router = useRouter();
+  const nav = useNav();
   const token = useUserStore((state) => state.token);
   const userId = useUserStore((state) => state.user?.id || "");
   const [keyword, setKeyword] = useState("");
@@ -450,7 +450,7 @@ function AgentsWorkbench() {
     setBatchFromTemplateOpen(false);
     message.success("已创建批量任务");
     // 直接跳到新建批次详情页
-    router.push(`/agents/batches/${detail.batch.id}`);
+    nav.push(`/agents/batches/${detail.batch.id}`);
   };
 
   // 批量任务 Tab 内容
@@ -496,7 +496,7 @@ function AgentsWorkbench() {
             <BatchCard
               key={item.id}
               item={item}
-              onOpen={() => router.push(`/agents/batches/${item.id}`)}
+              onOpen={() => nav.push(`/agents/batches/${item.id}`)}
               onDelete={() => handleDeleteBatch(item.id, item.name)}
               onStartAll={() => void handleStartAllForBatch(item.id)}
               onDownloadZip={() => void handleDownloadBatchZip(item.id, item.name)}

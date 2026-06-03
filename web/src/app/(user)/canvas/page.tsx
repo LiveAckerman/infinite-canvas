@@ -1,8 +1,9 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { App, Button } from "antd";
 import { Plus } from "lucide-react";
+
+import { useNav } from "@/lib/use-nav";
 
 import { RequireAuth } from "@/components/require-auth";
 import { saveCanvas } from "@/services/api/canvases";
@@ -27,7 +28,7 @@ export default function CanvasPage() {
 function CanvasLibrary() {
   useCanvasListSync();
   const { message } = App.useApp();
-  const router = useRouter();
+  const nav = useNav();
   const token = useUserStore((state) => state.token);
   const hydrated = useCanvasStore((state) => state.hydrated);
   const projects = useCanvasStore((state) => state.projects);
@@ -75,7 +76,7 @@ function CanvasLibrary() {
       return;
     }
     upsertProject(project);
-    router.push(`/canvas/${id}`);
+    nav.push(`/canvas/${id}`);
   };
 
   return (

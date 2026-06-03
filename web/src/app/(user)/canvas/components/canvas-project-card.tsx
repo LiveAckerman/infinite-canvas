@@ -1,8 +1,9 @@
 "use client";
 
 import { Check, Download, Pencil, Trash2, X } from "lucide-react";
-import { useRouter } from "next/navigation";
 import { App, Button, Input } from "antd";
+
+import { useNav } from "@/lib/use-nav";
 
 import { fetchCanvas, saveCanvas } from "@/services/api/canvases";
 import { useUserStore } from "@/stores/use-user-store";
@@ -11,7 +12,7 @@ import { useCanvasUiStore } from "../stores/use-canvas-ui-store";
 
 export function CanvasProjectCard({ project }: { project: CanvasProject }) {
   const { message } = App.useApp();
-  const router = useRouter();
+  const nav = useNav();
   const token = useUserStore((state) => state.token);
   const renameProject = useCanvasStore((state) => state.renameProject);
   const selectedIds = useCanvasUiStore((state) => state.selectedProjectIds);
@@ -24,7 +25,7 @@ export function CanvasProjectCard({ project }: { project: CanvasProject }) {
   const setDeleteIds = useCanvasUiStore((state) => state.setDeleteProjectIds);
   const editing = editingId === project.id;
   const selected = selectedIds.includes(project.id);
-  const open = () => router.push(`/canvas/${project.id}`);
+  const open = () => nav.push(`/canvas/${project.id}`);
   const saveTitle = async () => {
     const nextTitle = editingTitle.trim() || project.title;
     renameProject(project.id, nextTitle);

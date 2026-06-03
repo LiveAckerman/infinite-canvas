@@ -2,8 +2,9 @@
 
 import { Coins, LogOut, Menu, Shield, UserCircle2 } from "lucide-react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { Drawer, Tag, Tooltip } from "antd";
+
+import { useNav } from "@/lib/use-nav";
 
 import { GitHubLink } from "@/components/github-link";
 import { UserStatusActions } from "@/components/user-status-actions";
@@ -20,7 +21,7 @@ type AppTopNavProps = {
 };
 
 export function AppTopNav({ activeToolSlug, hideHeader = false }: AppTopNavProps) {
-  const router = useRouter();
+  const nav = useNav();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION || "dev";
   const theme = useThemeStore((state) => state.theme);
@@ -102,7 +103,7 @@ export function AppTopNav({ activeToolSlug, hideHeader = false }: AppTopNavProps
                     onThemeChange={setTheme}
                     userName={user.username}
                     menuItems={[
-                      { key: "profile", icon: <UserCircle2 className="size-4" />, label: "个人中心", onClick: () => router.push("/profile") },
+                      { key: "profile", icon: <UserCircle2 className="size-4" />, label: "个人中心", onClick: () => nav.push("/profile") },
                       ...(user.role === "admin" ? [{ key: "admin", icon: <Shield className="size-4" />, label: <Link href="/admin">管理后台</Link> }] : []),
                       { key: "logout", icon: <LogOut className="size-4" />, label: "退出登录", onClick: logout },
                     ]}

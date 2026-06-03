@@ -3,7 +3,8 @@
 import { ArrowLeft, ChevronRight, Download, Loader2, Pencil, Play, RotateCw, Sparkles, Trash2, Upload, X } from "lucide-react";
 import { App, Button, Image, Input, Tag, Tooltip, Typography } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
+import { useNav } from "@/lib/use-nav";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { formatDuration } from "@/lib/image-utils";
@@ -42,7 +43,7 @@ export default function PipelineRunDetailPage() {
 
 function PipelineRunDetail({ runId }: { runId: string }) {
   const { message, modal } = App.useApp();
-  const router = useRouter();
+  const nav = useNav();
   const queryClient = useQueryClient();
   const token = useUserStore((state) => state.token);
   const manager = usePipelineRunManagerCtx();
@@ -101,7 +102,7 @@ function PipelineRunDetail({ runId }: { runId: string }) {
 
   const deleteMutation = useMutation({
     mutationFn: () => deleteMyPipelineRun(token, runId),
-    onSuccess: () => router.push(backTarget),
+    onSuccess: () => nav.push(backTarget),
     onError: (error) => message.error(error instanceof Error ? error.message : "删除失败"),
   });
 
@@ -227,7 +228,7 @@ function PipelineRunDetail({ runId }: { runId: string }) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-stone-500">
         <p>{runQuery.error instanceof Error ? runQuery.error.message : "执行流程不存在"}</p>
-        <Button onClick={() => router.push(backTarget)}>返回列表</Button>
+        <Button onClick={() => nav.push(backTarget)}>返回列表</Button>
       </div>
     );
   }
@@ -250,7 +251,7 @@ function PipelineRunDetail({ runId }: { runId: string }) {
     <main className="thin-scrollbar mx-auto h-full w-full max-w-[1600px] overflow-y-auto p-4 lg:p-6">
       {/* 顶栏 */}
       <header className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-stone-200 bg-card p-3 shadow-sm dark:border-stone-800">
-        <Button icon={<ArrowLeft className="size-4" />} onClick={() => router.push(backTarget)}>返回</Button>
+        <Button icon={<ArrowLeft className="size-4" />} onClick={() => nav.push(backTarget)}>返回</Button>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <Typography.Title level={4} className="!mb-0 !text-base sm:!text-lg">{run.pipelineName || "未命名流水线"}</Typography.Title>

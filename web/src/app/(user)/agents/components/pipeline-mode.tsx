@@ -4,7 +4,7 @@ import { ChevronDown, FolderCog, Play, Plus } from "lucide-react";
 import { App, Button, Checkbox, Dropdown, Empty, Tag, type MenuProps } from "antd";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRouter } from "next/navigation";
+import { useNav } from "@/lib/use-nav";
 
 import { createId } from "@/lib/id";
 import { fetchMyPipelines, saveMyPipeline, deleteMyPipeline, type Pipeline, type PipelineListResponse } from "@/services/api/pipelines";
@@ -43,7 +43,7 @@ type Props = {
 export function PipelineMode({ agents }: Props) {
   const { message, modal } = App.useApp();
   const queryClient = useQueryClient();
-  const router = useRouter();
+  const nav = useNav();
   const token = useUserStore((state) => state.token);
 
   const pipelinesQuery = useQuery({
@@ -471,7 +471,7 @@ export function PipelineMode({ agents }: Props) {
                 <PipelineRunCard
                   key={run.id}
                   run={run}
-                  onOpen={() => router.push(`/agents/runs/${run.id}`)}
+                  onOpen={() => nav.push(`/agents/runs/${run.id}`)}
                   onDownload={() => void handleDownloadZip(run)}
                   onDelete={() => handleDeleteRun(run)}
                   onDuplicate={() => void handleDuplicateRun(run)}
