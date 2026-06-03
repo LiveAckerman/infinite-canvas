@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Script from "next/script";
 import NextTopLoader from "nextjs-toploader";
 import { AntThemeProvider } from "@/components/ant-theme-provider";
 import { QueryProvider } from "@/components/query-provider";
@@ -39,6 +40,13 @@ export default function RootLayout({
           height={3}
           showSpinner={false}
           shadow="0 0 8px #1677ff,0 0 4px #1677ff"
+        />
+        {/* umami 网页统计（自托管）。用 next/script afterInteractive：hydration 后再异步加载，
+            不阻塞首屏；data-website-id 会原样透传到 <script> 标签上。 */}
+        <Script
+          src="https://umami.thousandrealms.win/script.js"
+          data-website-id="53f7ffaa-f052-4e22-bdae-9cfa6288f3e3"
+          strategy="afterInteractive"
         />
         <ThemeSync />
         <AntThemeProvider>
