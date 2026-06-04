@@ -8,7 +8,8 @@ const (
 	UserRoleAdmin UserRole = "admin"
 )
 
-const DefaultUserCredits = 4
+// DefaultUserCredits 新用户注册赠送的积分数（同时用于 user.Credits 初始值和 signup_bonus 流水金额）。
+const DefaultUserCredits = 10
 
 // UserPreferences 用户跨设备的偏好配置（生图默认值等）。JSON 列存储，便于以后扩展。
 type UserPreferences struct {

@@ -86,7 +86,7 @@ function LoginContent() {
           />
           <h1 className="text-3xl font-semibold tracking-normal text-stone-950 dark:text-stone-100">{isRegister ? "注册账号" : "登录"}</h1>
           <p className="mt-3 text-base leading-7 text-stone-500 dark:text-stone-400">
-            {isRegister ? "新注册账号默认赠送 4 次生图额度，用完后请联系管理员充值。" : "登录后可使用画布、AI 生图、画布助手等功能。"}
+            {isRegister ? "新注册账号默认赠送 10 次生图额度，用完后请联系管理员充值。" : "登录后可使用画布、AI 生图、画布助手等功能。"}
           </p>
         </div>
 
