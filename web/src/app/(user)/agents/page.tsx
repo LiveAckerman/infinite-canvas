@@ -25,6 +25,7 @@ import {
 import { fetchMyPipelineBatchTemplates } from "@/services/api/pipeline-batch-templates";
 import { fetchMyPipelines, type Pipeline } from "@/services/api/pipelines";
 import {
+  resetRunForRedo,
   saveMyPipelineRun,
   type PipelineRun,
 } from "@/services/api/pipeline-runs";
@@ -92,6 +93,7 @@ function AgentsWorkbench() {
   const [batchTemplateManagerOpen, setBatchTemplateManagerOpen] = useState(false);
   const [batchFromTemplateOpen, setBatchFromTemplateOpen] = useState(false);
   const [startingBatchId, setStartingBatchId] = useState<string>("");
+  const [redoingBatchId, setRedoingBatchId] = useState<string>("");
   // 「下载 zip」按钮的 loading 锁定：记下正在下载的 batchId，避免用户连点重复打包
   const [downloadingBatchId, setDownloadingBatchId] = useState<string>("");
 
@@ -420,6 +422,52 @@ function AgentsWorkbench() {
     }
   };
 
+  // 「重做整个批次」：终态时从头重跑全批。把所有 main run 重置成 queued、post run 重置成 paused
+  // （steps 全清回 idle），保存后调度器（layout 那条 RUNS_QUERY_KEY 轮询 + manager）会自动接管：
+  // 先跑 main，跑完后端 UpdateBatchStatusAfterRunChange 再把 post 推到 queued 接着跑。
+  const redoBatchRuns = async (batchId: string) => {
+    const { fetchMyPipelineBatch } = await import("@/services/api/pipeline-batches");
+    const detail = await fetchMyPipelineBatch(token, batchId);
+    const tasks: PipelineRun[] = [
+      ...detail.mainRuns.map((run) => resetRunForRedo(run, "queued")),
+      ...detail.postRuns.map((run) => resetRunForRedo(run, "paused")),
+    ];
+    let ok = 0;
+    for (const next of tasks) {
+      try {
+        await saveMyPipelineRun(token, next);
+        ok += 1;
+      } catch {
+        // 单条失败不阻断
+      }
+    }
+    queryClient.invalidateQueries({ queryKey: BATCHES_QUERY_KEY });
+    queryClient.invalidateQueries({ queryKey: ["my-pipeline-batch", batchId] });
+    queryClient.invalidateQueries({ queryKey: ["my-pipeline-runs"] });
+    return ok;
+  };
+
+  const handleRedoBatch = (batchId: string, name: string) => {
+    modal.confirm({
+      title: "重做整个批量任务？",
+      content: `「${name || "未命名批次"}」会清掉现有产物，从头重新跑一遍所有主条和后处理（按现在的输入），重新消耗额度。确定吗？`,
+      okText: "重做",
+      cancelText: "取消",
+      onOk: async () => {
+        setRedoingBatchId(batchId);
+        try {
+          const ok = await redoBatchRuns(batchId);
+          if (ok > 0) message.success("已重新排队，稍等会自动开跑");
+          else message.error("重做失败");
+        } catch (error) {
+          message.error(error instanceof Error ? error.message : "重做失败");
+        } finally {
+          setRedoingBatchId("");
+        }
+      },
+    });
+  };
+
   const handleDeleteBatch = (id: string, name: string) => {
     modal.confirm({
       title: "删除批量任务",
@@ -499,8 +547,10 @@ function AgentsWorkbench() {
               onOpen={() => nav.push(`/agents/batches/${item.id}`)}
               onDelete={() => handleDeleteBatch(item.id, item.name)}
               onStartAll={() => void handleStartAllForBatch(item.id)}
+              onRedo={() => handleRedoBatch(item.id, item.name)}
               onDownloadZip={() => void handleDownloadBatchZip(item.id, item.name)}
               starting={startingBatchId === item.id}
+              redoing={redoingBatchId === item.id}
               downloading={downloadingBatchId === item.id}
             />
           ))}

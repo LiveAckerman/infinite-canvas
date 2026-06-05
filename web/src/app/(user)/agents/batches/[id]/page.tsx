@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, ArrowLeft, Download, Play, RefreshCw, Trash2 } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Download, Play, RefreshCw, RotateCw, Trash2 } from "lucide-react";
 import { App, Button, Image, Progress, Tag, Typography } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
@@ -21,6 +21,7 @@ import {
 import {
   collectRunProductKeys,
   downloadSingleImage,
+  resetRunForRedo,
   saveMyPipelineRun,
   type PipelineRun,
   type PipelineRunListResponse,
@@ -51,6 +52,7 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
   // 「我先去补救」=> 用户暂时把决策卡隐藏；只能等用户主动点旁边的「重新检查 sources」再次显示
   const [decisionCardHidden, setDecisionCardHidden] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [redoing, setRedoing] = useState(false);
   // 后处理 run 重做时锁定 button，避免重复点击触发多次 PUT
   const [retryingPostId, setRetryingPostId] = useState<string>("");
   // 跟 post 那条独立：主条「失败」直接在卡片上点「重试」时给按钮单独 loading 态
@@ -318,6 +320,58 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
     });
   };
 
+  // 「重做整个批次」：终态时从头重跑全批。所有 main run 重置成 queued、post run 重置成 paused（steps 清回 idle），
+  // 写库后乐观更新 detail / list 两份 cache —— 调度器立刻接管跑 main，跑完后端再把 post 推 queued 接着跑。
+  const handleRedoBatch = () => {
+    if (!detail) return;
+    modal.confirm({
+      title: "重做整个批量任务？",
+      content: `「${detail.batch.name || "未命名批次"}」会清掉现有产物，从头重新跑一遍所有主条和后处理（按现在的输入），重新消耗额度。确定吗？`,
+      okText: "重做",
+      cancelText: "取消",
+      onOk: async () => {
+        setRedoing(true);
+        try {
+          const mains = detail.mainRuns.map((run) => resetRunForRedo(run, "queued"));
+          const posts = detail.postRuns.map((run) => resetRunForRedo(run, "paused"));
+          const savedMains: PipelineRun[] = [];
+          const savedPosts: PipelineRun[] = [];
+          for (const next of mains) {
+            try { savedMains.push(await saveMyPipelineRun(token, next)); } catch { /* 单条失败不阻断 */ }
+          }
+          for (const next of posts) {
+            try { savedPosts.push(await saveMyPipelineRun(token, next)); } catch { /* 单条失败不阻断 */ }
+          }
+          const all = [...savedMains, ...savedPosts];
+          // 乐观写 detail（本页 PostRunCard / 主条卡立即反映）+ list cache（调度器读这里）
+          queryClient.setQueryData<PipelineBatchDetail>([...BATCHES_QUERY_KEY, batchId], (old) => {
+            if (!old) return old;
+            const map = new Map(all.map((r) => [r.id, r]));
+            return {
+              ...old,
+              mainRuns: old.mainRuns.map((r) => map.get(r.id) || r),
+              postRuns: old.postRuns.map((r) => map.get(r.id) || r),
+            };
+          });
+          queryClient.setQueryData<PipelineRunListResponse>(RUNS_QUERY_KEY, (old) => {
+            if (!old) return { items: all, total: all.length };
+            const map = new Map(old.items.map((r) => [r.id, r]));
+            for (const r of all) map.set(r.id, r);
+            const items = Array.from(map.values());
+            return { ...old, items, total: items.length };
+          });
+          queryClient.invalidateQueries({ queryKey: BATCHES_QUERY_KEY });
+          queryClient.invalidateQueries({ queryKey: ["my-pipeline-runs"] });
+          message.success("已重新排队，稍等会自动开跑");
+        } catch (error) {
+          message.error(error instanceof Error ? error.message : "重做失败");
+        } finally {
+          setRedoing(false);
+        }
+      },
+    });
+  };
+
   const handleSkipPost = () => {
     modal.confirm({
       title: "确定跳过后处理？",
@@ -452,6 +506,11 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
               onClick={() => void handleDownloadZip()}
             >
               下载所有产物 (zip)
+            </Button>
+          ) : null}
+          {isTerminal ? (
+            <Button icon={<RotateCw className="size-4" />} loading={redoing} onClick={handleRedoBatch}>
+              重做
             </Button>
           ) : null}
           <Button danger icon={<Trash2 className="size-4" />} onClick={handleDelete}>删除</Button>

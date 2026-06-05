@@ -1,6 +1,6 @@
 "use client";
 
-import { Download, Play, Trash2 } from "lucide-react";
+import { Download, Play, RotateCw, Trash2 } from "lucide-react";
 import { Button, Progress, Tag, Tooltip, Typography } from "antd";
 import { useMemo } from "react";
 
@@ -13,10 +13,14 @@ type Props = {
   onDelete: () => void;
   // 「全部启动」：把所有 main run 从 paused → queued，触发调度器跑批
   onStartAll: () => void;
+  // 「重做整个批次」：终态时把所有 main/post run 重置后从头重跑
+  onRedo: () => void;
   // 下载该批次的 zip 产物包，仅终态可用
   onDownloadZip: () => void;
   // 「全部启动」按钮的 loading 态
   starting?: boolean;
+  // 「重做」按钮的 loading 态
+  redoing?: boolean;
   // 「下载 zip」按钮的 loading 态。zip 是流式拉，体积大时几秒到十几秒不等，
   // 没 loading 用户以为按钮没生效会狂点。
   downloading?: boolean;
@@ -30,7 +34,7 @@ type Props = {
 //
 // 进度计算口径：(mainSuccess + postSuccess) / (mainTotal + postTotal)；
 // 没启用 post 时分母自然变成只算主条，跟 UI 描述行一致。
-export function BatchCard({ item, onOpen, onDelete, onStartAll, onDownloadZip, starting, downloading }: Props) {
+export function BatchCard({ item, onOpen, onDelete, onStartAll, onRedo, onDownloadZip, starting, redoing, downloading }: Props) {
   const isTerminal = item.status === "success" || item.status === "partial" || item.status === "failed";
   const isPostWaiting = item.status === "post_waiting";
   const isQueued = item.status === "queued";
@@ -156,6 +160,17 @@ export function BatchCard({ item, onOpen, onDelete, onStartAll, onDownloadZip, s
           >
             下载 zip
           </Button>
+        ) : null}
+        {isTerminal ? (
+          <Tooltip title="清掉现有产物，从头重新跑整个批次">
+            <Button
+              icon={<RotateCw className="size-3.5" />}
+              loading={redoing}
+              onClick={onRedo}
+            >
+              重做
+            </Button>
+          </Tooltip>
         ) : null}
       </div>
     </div>

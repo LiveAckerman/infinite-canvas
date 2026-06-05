@@ -68,6 +68,23 @@ export type PipelineRunListResponse = {
   total: number;
 };
 
+// resetRunForRedo 把一条 run 重置成「待跑」用于重做：清掉所有 step 的产物/错误/耗时/快照回到 idle，
+// run 设成指定状态——main 用 "queued"（调度器立刻接管跑），post 用 "paused"（等主条跑完后端再推 queued）。
+export function resetRunForRedo(run: PipelineRun, status: "queued" | "paused"): PipelineRun {
+  return {
+    ...run,
+    status,
+    steps: run.steps.map((step) => ({
+      ...step,
+      status: "idle",
+      outputKey: undefined,
+      errorMessage: undefined,
+      durationMs: undefined,
+      lastRunSnapshot: undefined,
+    })),
+  };
+}
+
 export async function fetchMyPipelineRuns(token: string) {
   return apiGet<PipelineRunListResponse>("/api/pipeline-runs/me", undefined, token);
 }
