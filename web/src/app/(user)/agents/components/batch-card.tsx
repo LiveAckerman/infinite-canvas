@@ -1,7 +1,7 @@
 "use client";
 
 import { Download, Play, RotateCw, Trash2 } from "lucide-react";
-import { Button, Progress, Tag, Tooltip, Typography } from "antd";
+import { Button, Checkbox, Progress, Tag, Tooltip, Typography } from "antd";
 import { useMemo } from "react";
 
 import type { PipelineBatchListItem } from "@/services/api/pipeline-batches";
@@ -24,6 +24,9 @@ type Props = {
   // 「下载 zip」按钮的 loading 态。zip 是流式拉，体积大时几秒到十几秒不等，
   // 没 loading 用户以为按钮没生效会狂点。
   downloading?: boolean;
+  // 多选删除：勾选状态 + 变更回调（传了 onSelectedChange 才渲染勾选框）
+  selected?: boolean;
+  onSelectedChange?: (checked: boolean) => void;
 };
 
 // 批量任务列表项卡片。一眼看清这条 batch 的总体状态 + main / post 进度，并提供常用操作入口。
@@ -34,7 +37,7 @@ type Props = {
 //
 // 进度计算口径：(mainSuccess + postSuccess) / (mainTotal + postTotal)；
 // 没启用 post 时分母自然变成只算主条，跟 UI 描述行一致。
-export function BatchCard({ item, onOpen, onDelete, onStartAll, onRedo, onDownloadZip, starting, redoing, downloading }: Props) {
+export function BatchCard({ item, onOpen, onDelete, onStartAll, onRedo, onDownloadZip, starting, redoing, downloading, selected, onSelectedChange }: Props) {
   const isTerminal = item.status === "success" || item.status === "partial" || item.status === "failed";
   const isPostWaiting = item.status === "post_waiting";
   const isQueued = item.status === "queued";
@@ -80,9 +83,17 @@ export function BatchCard({ item, onOpen, onDelete, onStartAll, onRedo, onDownlo
 
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-stone-200 bg-card p-4 shadow-sm transition hover:shadow-md dark:border-stone-800">
-      {/* 顶部行：名字 + 状态 + 删除 */}
+      {/* 顶部行：勾选 + 名字 + 状态 + 删除 */}
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 flex-1 items-start gap-2">
+          {onSelectedChange ? (
+            <Checkbox
+              className="mt-0.5 shrink-0"
+              checked={selected}
+              onChange={(event) => onSelectedChange(event.target.checked)}
+            />
+          ) : null}
+          <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <Typography.Text strong className="!text-sm">
               {item.name || "未命名批次"}
@@ -91,6 +102,7 @@ export function BatchCard({ item, onOpen, onDelete, onStartAll, onRedo, onDownlo
             <Typography.Text type="secondary" className="!text-xs">
               {createdLabel}
             </Typography.Text>
+          </div>
           </div>
         </div>
         <Tooltip title="删除该批量任务">

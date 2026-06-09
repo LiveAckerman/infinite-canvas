@@ -238,16 +238,18 @@ export function PipelineRunCard({ run, onOpen, onDownload, onDelete, onDuplicate
         {eligible && hasAnyOutput ? (
           <Button icon={<RotateCw className="size-3.5" />} onClick={onStart} title="清空旧产物，从第 1 步重新跑">重新执行</Button>
         ) : null}
-        {/* 批次模式专用「重试」：失败主条 + 父层传了 onRetry → 显示。点了清 steps 重跑，不用进详情页 */}
-        {onRetry && run.status === "failed" ? (
+        {/* 批次模式专用「重做 / 重试」：父层传了 onRetry + 这条主条已跑完（success/partial/failed）→ 显示。
+            点了清掉这条主条所有步骤的产物、从第 1 步重新跑这一条（不影响批次其它主条，也不用进详情页）。
+            失败的叫「重试」(primary 强调)，成功 / 部分完成的叫「重做」。 */}
+        {onRetry && (run.status === "success" || run.status === "partial" || run.status === "failed") ? (
           <Button
-            type="primary"
+            type={run.status === "failed" ? "primary" : "default"}
             icon={<RotateCw className="size-3.5" />}
             loading={retrying}
             onClick={onRetry}
-            title="清空已跑步骤，从第 1 步重新跑这条主条"
+            title="清空这条主条的产物，从第 1 步重新跑（不影响其它主条）"
           >
-            重试
+            {run.status === "failed" ? "重试" : "重做"}
           </Button>
         ) : null}
         {!hideDuplicate ? (

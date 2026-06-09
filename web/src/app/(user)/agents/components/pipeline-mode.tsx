@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, FolderCog, Play, Plus } from "lucide-react";
+import { ChevronDown, FolderCog, Play, Plus, Trash2 } from "lucide-react";
 import { App, Button, Checkbox, Dropdown, Empty, Tag, type MenuProps } from "antd";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -304,6 +304,29 @@ export function PipelineMode({ agents }: Props) {
     });
   };
 
+  // 批量删除选中的执行流程（勾选范围 = 工具栏里可勾的那些：已上传原图、未在跑的）。
+  const handleDeleteSelectedRuns = () => {
+    const targets = selectedEligibleRuns;
+    if (targets.length === 0) return;
+    modal.confirm({
+      title: `删除选中的 ${targets.length} 条执行流程`,
+      content: "确定删除这些执行流程吗？关联的图片资源（原图、各步产物）也会一并删除（仍被别处引用的，比如已加入素材库的，会保留）。",
+      okText: "删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        for (const run of targets) {
+          try {
+            await deleteRunMutation.mutateAsync(run.id);
+          } catch {
+            // onError 已弹 toast
+          }
+        }
+        setSelectedRunIds(new Set());
+      },
+    });
+  };
+
   const handleDownloadZip = async (run: PipelineRun) => {
     setDownloadingId(run.id);
     try {
@@ -447,6 +470,15 @@ export function PipelineMode({ agents }: Props) {
                   onClick={handleClickStartSelected}
                 >
                   执行选中（{selectedEligibleRuns.length}）
+                </Button>
+                <Button
+                  size="small"
+                  danger
+                  icon={<Trash2 className="size-3.5" />}
+                  disabled={selectedEligibleRuns.length === 0}
+                  onClick={handleDeleteSelectedRuns}
+                >
+                  删除选中（{selectedEligibleRuns.length}）
                 </Button>
                 <Button
                   size="small"

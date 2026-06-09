@@ -1,7 +1,7 @@
 "use client";
 
-import { FolderCog, History, Layers, Plus, Search } from "lucide-react";
-import { App, Button, Empty, Input, Modal, Tabs, Tag } from "antd";
+import { FolderCog, History, Layers, Plus, Search, Trash2 } from "lucide-react";
+import { App, Button, Checkbox, Empty, Input, Modal, Tabs, Tag } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNav } from "@/lib/use-nav";
@@ -94,6 +94,8 @@ function AgentsWorkbench() {
   const [batchFromTemplateOpen, setBatchFromTemplateOpen] = useState(false);
   const [startingBatchId, setStartingBatchId] = useState<string>("");
   const [redoingBatchId, setRedoingBatchId] = useState<string>("");
+  // 批量任务多选删除：勾中的 batch id 集合
+  const [selectedBatchIds, setSelectedBatchIds] = useState<Set<string>>(new Set());
   // 「下载 zip」按钮的 loading 锁定：记下正在下载的 batchId，避免用户连点重复打包
   const [downloadingBatchId, setDownloadingBatchId] = useState<string>("");
 
@@ -480,6 +482,42 @@ function AgentsWorkbench() {
     });
   };
 
+  // ===== 批量任务多选删除 =====
+  const toggleSelectBatch = (id: string, checked: boolean) => {
+    setSelectedBatchIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+  const allBatchesSelected = batchesList.length > 0 && selectedBatchIds.size === batchesList.length;
+  const someBatchesSelected = selectedBatchIds.size > 0 && !allBatchesSelected;
+  const toggleSelectAllBatches = (checked: boolean) => {
+    setSelectedBatchIds(checked ? new Set(batchesList.map((item) => item.id)) : new Set());
+  };
+  const handleDeleteSelectedBatches = () => {
+    const ids = batchesList.filter((item) => selectedBatchIds.has(item.id)).map((item) => item.id);
+    if (ids.length === 0) return;
+    modal.confirm({
+      title: `删除选中的 ${ids.length} 个批量任务`,
+      content: "确定删除这些批量任务吗？它们下面所有 main / post run 以及关联的图片资源都会一并删除（仍被别处引用的会保留）。",
+      okText: "删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        for (const id of ids) {
+          try {
+            await deleteBatchMutation.mutateAsync(id);
+          } catch {
+            // onError 已弹 toast
+          }
+        }
+        setSelectedBatchIds(new Set());
+      },
+    });
+  };
+
   const handleDownloadBatchZip = async (id: string, name: string) => {
     if (downloadingBatchId) return; // 同一时间只让一个下载在跑，防连点
     setDownloadingBatchId(id);
@@ -539,7 +577,29 @@ function AgentsWorkbench() {
           />
         </div>
       ) : (
-        <div className="flex flex-col gap-3">
+        <>
+          {/* 多选删除工具栏 */}
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm dark:border-stone-800 dark:bg-stone-900">
+            <Checkbox
+              checked={allBatchesSelected}
+              indeterminate={someBatchesSelected}
+              onChange={(event) => toggleSelectAllBatches(event.target.checked)}
+            >
+              全选（{batchesList.length}）
+            </Checkbox>
+            <span className="text-xs text-stone-500 dark:text-stone-400">已选 {selectedBatchIds.size} 个</span>
+            <Button
+              className="ml-auto"
+              size="small"
+              danger
+              icon={<Trash2 className="size-3.5" />}
+              disabled={selectedBatchIds.size === 0}
+              onClick={handleDeleteSelectedBatches}
+            >
+              删除选中（{selectedBatchIds.size}）
+            </Button>
+          </div>
+          <div className="flex flex-col gap-3">
           {batchesList.map((item) => (
             <BatchCard
               key={item.id}
@@ -552,9 +612,12 @@ function AgentsWorkbench() {
               starting={startingBatchId === item.id}
               redoing={redoingBatchId === item.id}
               downloading={downloadingBatchId === item.id}
+              selected={selectedBatchIds.has(item.id)}
+              onSelectedChange={(checked) => toggleSelectBatch(item.id, checked)}
             />
           ))}
-        </div>
+          </div>
+        </>
       )}
     </div>
   );
