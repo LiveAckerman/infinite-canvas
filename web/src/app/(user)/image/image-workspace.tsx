@@ -24,9 +24,9 @@ import { AssetPickerModal, type InsertAssetPayload } from "@/app/(user)/canvas/c
 import type { AiConfig } from "@/lib/ai-config";
 import { createId } from "@/lib/id";
 import { formatBytes, formatDuration, readImageMeta } from "@/lib/image-utils";
-import { resolveImageUrl } from "@/services/image-storage";
+import { imageUrl, resolveImageUrl } from "@/services/image-storage";
 import { useImageUploader } from "@/lib/use-image-uploader";
-import { deleteGeneration, fetchGenerations, retryGeneration, runGeneration, saveGeneration, type GenerationListResponse, type GenerationRecord } from "@/services/api/generations";
+import { deleteGeneration, fetchGeneration, fetchGenerations, retryGeneration, runGeneration, saveGeneration, type GenerationListResponse, type GenerationRecord } from "@/services/api/generations";
 import { saveMyAsset } from "@/services/api/my-assets";
 import { useAiConfigStore } from "@/stores/use-ai-config-store";
 import { fetchCurrentUser } from "@/services/api/auth";
@@ -74,6 +74,7 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const config = useAiConfigStore((state) => state.config);
   const updateConfig = useAiConfigStore((state) => state.updateConfig);
+  const applyConfigLocal = useAiConfigStore((state) => state.applyConfigLocal);
   const token = useUserStore((state) => state.token);
   const setCredits = useUserStore((state) => state.setCredits);
   const uploadWithToast = useImageUploader();
@@ -263,15 +264,22 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
     if (autoPreviewedIdRef.current === initialLogId) return;
     if (!logs.length) return;
     const target = logs.find((log) => log.id === initialLogId);
-    if (!target) {
-      // 找不到这条记录，回 /image 不要让 URL 一直挂着无效 id。
-      autoPreviewedIdRef.current = initialLogId;
-      message.error("生成记录不存在或已被删除");
-      router.replace("/image");
+    autoPreviewedIdRef.current = initialLogId;
+    if (target) {
+      void previewGenerationLog(target, { skipNavigate: true });
       return;
     }
-    autoPreviewedIdRef.current = initialLogId;
-    void previewGenerationLog(target, { skipNavigate: true });
+    // 列表只拉前 100 条；深链指向更早（第 101 条之后）的记录时 logs 里找不到，
+    // 单独拉一次确认，真的不存在 / 已删除才报错跳回，避免误报「记录不存在」。
+    void (async () => {
+      try {
+        const record = await fetchGeneration(token, initialLogId);
+        await previewGenerationLog(record, { skipNavigate: true });
+      } catch {
+        message.error("生成记录不存在或已被删除");
+        router.replace("/image");
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialLogId, logs.length]);
 
@@ -475,7 +483,11 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
       return;
     }
     try {
-      const url = image.dataUrl || (await uploadWithToast(image.dataUrl, { label: "素材图片" })).url;
+      // 持久化字段必须用图床直链 imageUrl(storageKey)，不能用 image.dataUrl —— 后者在刚生成 / 刚上传的
+      // 会话里可能是 blob: ObjectURL，存进素材库刷新 / 换浏览器就 404。生成结果一定带 storageKey。
+      const url = image.storageKey
+        ? imageUrl(image.storageKey)
+        : (await uploadWithToast(image.dataUrl, { label: "素材图片" })).url;
       await saveMyAsset(token, {
         title: `生成结果 ${index + 1}`,
         type: "image",
@@ -533,6 +545,10 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
         setPreviewLog(null);
         setResults([]);
         autoPreviewedIdRef.current = null;
+        // 删掉的若正是「本会话刚发起的那条」，一并清掉 active 标记，避免残留 id 让轮询 / auto-preview 误判。
+        if (activeGenerationIdRef.current && selectedLogIds.includes(activeGenerationIdRef.current)) {
+          activeGenerationIdRef.current = null;
+        }
         router.replace("/image");
       }
       setSelectedLogIds([]);
@@ -577,6 +593,7 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
       if (newCount === 0) {
         // 没有任何产物 / 失败槽了 → 整条记录已无意义，直接删掉回到空白工作台。
         await deleteLogMutation.mutateAsync(previewLog.id);
+        if (activeGenerationIdRef.current === previewLog.id) activeGenerationIdRef.current = null;
         setPreviewLog(null);
         setResults([]);
         autoPreviewedIdRef.current = null;
@@ -693,9 +710,19 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
 
     // 回填这条记录的工作台参数（同步，始终用最后一次选择的，不会被异步覆盖）。
     setPrompt(log.prompt);
-    updateConfig("count", String(log.count || 1));
-    if (log.size) updateConfig("size", log.size);
-    if (log.quality) updateConfig("quality", log.quality);
+    // ⚠️ 用 applyConfigLocal（仅本地、不上传）回填，而不是 updateConfig：
+    // 只是「查看 / 以此记录为底继续生成」，不该把用户默认偏好改掉并同步到 /api/user/preferences。
+    applyConfigLocal({
+      count: String(log.count || 1),
+      ...(log.size ? { size: log.size } : {}),
+      ...(log.quality ? { quality: log.quality } : {}),
+    });
+    // 计时器恢复：切到 / 刷新回一条仍在 running 的记录时，用 createdAt 估算 startedAt，
+    // 让顶部「生成中 X 秒」接着走（否则 startedAt=0，计时器 effect 直接 return 永远显示「…」）。
+    if (log.status === "running") {
+      const createdMs = log.createdAt ? new Date(log.createdAt).getTime() : 0;
+      setStartedAt(createdMs > 0 ? performance.now() - (Date.now() - createdMs) : performance.now());
+    }
 
     // 异步部分：参考图 + 结果都要等图片 resolve；完成后必须复核「现在选中的还是这条」才落地。
     const restored = log.references?.length
@@ -739,7 +766,11 @@ export function ImageWorkspace({ initialLogId }: ImageWorkspaceProps) {
       const record = await retryGeneration(token, previewLog.id);
       upsertLogCache(record);
       setPreviewLog(record);
-      setResults(await deriveResultsFromRecord(record));
+      currentPreviewIdRef.current = record.id;
+      // 跟 generate / previewGenerationLog / 轮询同款防串台：deriveResultsFromRecord 要逐张
+      // resolve 图片（数百 ms），其间用户可能切到别的记录，落地前复核「现在选中的还是这条」。
+      const derived = await deriveResultsFromRecord(record);
+      if (currentPreviewIdRef.current === record.id) setResults(derived);
       void queryClient.invalidateQueries({ queryKey: ["my-generations"] });
     } catch (error) {
       message.error(error instanceof Error ? error.message : "重试失败");

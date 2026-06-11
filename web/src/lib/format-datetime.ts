@@ -39,3 +39,20 @@ export function formatLocalDateTimeShort(value?: string | null, fallback = "-") 
   if (!date) return fallback;
   return date.toLocaleString("zh-CN", SHORT_OPTIONS).replace(/\//g, "-");
 }
+
+// 相对时间："刚刚 / N 分钟前 / N 小时前 / N 天前 / yyyy-MM-dd"。
+// 批量任务卡片、流水线执行流程卡片共用（原先两份逐字重复）。
+export function formatRelativeTime(value?: string | null): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const diff = Date.now() - date.getTime();
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (diff < minute) return "刚刚";
+  if (diff < hour) return `${Math.floor(diff / minute)} 分钟前`;
+  if (diff < day) return `${Math.floor(diff / hour)} 小时前`;
+  if (diff < 7 * day) return `${Math.floor(diff / day)} 天前`;
+  return date.toLocaleDateString("zh-CN");
+}

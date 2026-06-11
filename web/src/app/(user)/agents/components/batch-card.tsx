@@ -4,6 +4,7 @@ import { Download, Play, RotateCw, Trash2 } from "lucide-react";
 import { Button, Checkbox, Progress, Tag, Tooltip, Typography } from "antd";
 import { useMemo } from "react";
 
+import { formatRelativeTime } from "@/lib/format-datetime";
 import type { PipelineBatchListItem } from "@/services/api/pipeline-batches";
 
 type Props = {
@@ -79,7 +80,7 @@ export function BatchCard({ item, onOpen, onDelete, onStartAll, onRedo, onDownlo
     return "normal";
   })();
 
-  const createdLabel = useMemo(() => formatRelative(item.createdAt), [item.createdAt]);
+  const createdLabel = useMemo(() => formatRelativeTime(item.createdAt), [item.createdAt]);
 
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-stone-200 bg-card p-4 shadow-sm transition hover:shadow-md dark:border-stone-800">
@@ -187,20 +188,4 @@ export function BatchCard({ item, onOpen, onDelete, onStartAll, onRedo, onDownlo
       </div>
     </div>
   );
-}
-
-// 「3 分钟前 / 1 小时前 / yyyy-MM-dd」简易相对时间。和 pipeline-run-card 保持一致。
-function formatRelative(timestamp: string): string {
-  if (!timestamp) return "";
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) return timestamp;
-  const diff = Date.now() - date.getTime();
-  const minute = 60 * 1000;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-  if (diff < minute) return "刚刚";
-  if (diff < hour) return `${Math.floor(diff / minute)} 分钟前`;
-  if (diff < day) return `${Math.floor(diff / hour)} 小时前`;
-  if (diff < 7 * day) return `${Math.floor(diff / day)} 天前`;
-  return date.toLocaleDateString("zh-CN");
 }

@@ -1,7 +1,7 @@
 "use client";
 
-import { FolderCog, History, Layers, Plus, Search, Trash2 } from "lucide-react";
-import { App, Button, Checkbox, Empty, Input, Modal, Tabs, Tag } from "antd";
+import { FolderCog, History, Layers, PanelLeftClose, PanelLeftOpen, Plus, Search, Trash2 } from "lucide-react";
+import { App, Button, Checkbox, Empty, Input, Modal, Tabs, Tag, Tooltip } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNav } from "@/lib/use-nav";
@@ -52,6 +52,9 @@ function loadMode(): WorkbenchMode {
   return "parallel";
 }
 
+// 「我的角色」侧栏是否收起（仅桌面端生效），localStorage 持久化。参考 /image 左侧记录面板。
+const SIDEBAR_COLLAPSED_KEY = "infinite-canvas:agents:sidebar-collapsed";
+
 const WORKSTATION_CARDS_QUERY_KEY = ["my-workstation-cards"] as const;
 
 const AGENTS_QUERY_KEY = ["my-agents"] as const;
@@ -87,6 +90,15 @@ function AgentsWorkbench() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(MODE_STORAGE_KEY, mode);
   }, [mode]);
+  // 「我的角色」侧栏收起态（仅桌面端 lg+ 生效，移动端始终展开），localStorage 持久化。
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? "1" : "0");
+  }, [sidebarCollapsed]);
 
   // 批量任务相关：3 个 Modal 开关 + 「全部启动」单条 loading 标识（用 batchId 标定）
   const [batchCreateOpen, setBatchCreateOpen] = useState(false);
@@ -294,47 +306,87 @@ function AgentsWorkbench() {
     }
   };
 
-  // 「我的角色」侧栏 —— 抽成一个 JSX 片段，桌面侧边 + 移动端在 Tab 之上各用一份
+  // 「我的角色」侧栏 —— 抽成一个 JSX 片段，桌面侧边 + 移动端在 Tab 之上各用一份。
+  // 桌面端 lg+ 可收起成一条细窄竖条（只剩展开按钮）；移动端始终展开（收起态的细条 hidden lg:flex，展开内容 lg:hidden）。
   const agentLibrarySidebar = (
-    <aside className="flex max-h-[45vh] w-full shrink-0 flex-col rounded-lg border border-stone-200 bg-card shadow-sm dark:border-stone-800 lg:max-h-none lg:h-full lg:w-72 xl:w-80">
-      <div className="flex items-center justify-between gap-2 border-b border-stone-200 px-3 py-2.5 dark:border-stone-800">
-        <div className="flex items-center gap-2">
-          <h2 className="text-sm font-semibold">我的角色</h2>
-          <Tag className="m-0">{agents.length}</Tag>
+    <aside
+      className={`flex max-h-[45vh] w-full shrink-0 flex-col rounded-lg border border-stone-200 bg-card shadow-sm transition-[width] duration-300 ease-in-out dark:border-stone-800 lg:max-h-none lg:h-full ${
+        sidebarCollapsed ? "lg:w-12" : "lg:w-72 xl:w-80"
+      }`}
+    >
+      {/* 桌面端收起态：竖条，只显示展开按钮 + 竖排标题 */}
+      {sidebarCollapsed ? (
+        <div className="hidden flex-col items-center gap-3 py-3 lg:flex">
+          <Tooltip title="展开我的角色" placement="right">
+            <button
+              type="button"
+              className="grid size-8 place-items-center rounded-md text-stone-500 transition hover:bg-stone-100 hover:text-stone-900 dark:hover:bg-stone-800 dark:hover:text-stone-100"
+              onClick={() => setSidebarCollapsed(false)}
+              aria-label="展开我的角色"
+            >
+              <PanelLeftOpen className="size-4" />
+            </button>
+          </Tooltip>
+          <span className="select-none text-xs tracking-wide text-stone-400 [writing-mode:vertical-rl] dark:text-stone-500">
+            我的角色 {agents.length}
+          </span>
         </div>
-        <Button size="small" type="primary" icon={<Plus className="size-3.5" />} onClick={() => handleEdit(null)}>新建</Button>
-      </div>
-      <div className="px-3 py-2">
-        <Input
-          allowClear
-          size="small"
-          prefix={<Search className="size-3.5 text-stone-400" />}
-          placeholder="搜索角色名 / 描述 / 提示词"
-          value={keyword}
-          onChange={(event) => setKeyword(event.target.value)}
-        />
-      </div>
-      <div className="thin-scrollbar flex-1 space-y-2 overflow-y-auto px-3 pb-3 lg:min-h-0">
-        {agentsQuery.isLoading ? (
-          <div className="flex h-32 items-center justify-center text-sm text-stone-500">正在加载…</div>
-        ) : agents.length === 0 ? (
-          <Empty description="还没有角色，点上方「新建」开始" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-        ) : filteredAgents.length === 0 ? (
-          <div className="flex h-24 items-center justify-center text-sm text-stone-500">没有匹配的角色</div>
-        ) : (
-          filteredAgents.map((agent) => (
-            <AgentLibraryCard
-              key={agent.id}
-              agent={agent}
-              inWorkspace={workspaceIds.has(agent.id)}
-              onAddToWorkspace={() => addToWorkspace(agent)}
-              onEdit={() => handleEdit(agent)}
-              onDuplicate={() => void handleDuplicate(agent)}
-              onDelete={() => setDeletingAgent(agent)}
-              showAddToWorkspace={mode === "parallel"}
-            />
-          ))
-        )}
+      ) : null}
+
+      {/* 展开态内容：桌面端收起时隐藏（lg:hidden），移动端始终显示 */}
+      <div className={`flex min-h-0 flex-1 flex-col ${sidebarCollapsed ? "lg:hidden" : ""}`}>
+        <div className="flex items-center justify-between gap-2 border-b border-stone-200 px-3 py-2.5 dark:border-stone-800">
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-semibold">我的角色</h2>
+            <Tag className="m-0">{agents.length}</Tag>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Button size="small" type="primary" icon={<Plus className="size-3.5" />} onClick={() => handleEdit(null)}>新建</Button>
+            {/* 收起按钮仅桌面端显示（移动端侧栏堆在上方、不收起） */}
+            <Tooltip title="收起我的角色">
+              <button
+                type="button"
+                className="hidden size-7 place-items-center rounded-md text-stone-500 transition hover:bg-stone-100 hover:text-stone-900 dark:hover:bg-stone-800 dark:hover:text-stone-100 lg:grid"
+                onClick={() => setSidebarCollapsed(true)}
+                aria-label="收起我的角色"
+              >
+                <PanelLeftClose className="size-4" />
+              </button>
+            </Tooltip>
+          </div>
+        </div>
+        <div className="px-3 py-2">
+          <Input
+            allowClear
+            size="small"
+            prefix={<Search className="size-3.5 text-stone-400" />}
+            placeholder="搜索角色名 / 描述 / 提示词"
+            value={keyword}
+            onChange={(event) => setKeyword(event.target.value)}
+          />
+        </div>
+        <div className="thin-scrollbar flex-1 space-y-2 overflow-y-auto px-3 pb-3 lg:min-h-0">
+          {agentsQuery.isLoading ? (
+            <div className="flex h-32 items-center justify-center text-sm text-stone-500">正在加载…</div>
+          ) : agents.length === 0 ? (
+            <Empty description="还没有角色，点上方「新建」开始" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          ) : filteredAgents.length === 0 ? (
+            <div className="flex h-24 items-center justify-center text-sm text-stone-500">没有匹配的角色</div>
+          ) : (
+            filteredAgents.map((agent) => (
+              <AgentLibraryCard
+                key={agent.id}
+                agent={agent}
+                inWorkspace={workspaceIds.has(agent.id)}
+                onAddToWorkspace={() => addToWorkspace(agent)}
+                onEdit={() => handleEdit(agent)}
+                onDuplicate={() => void handleDuplicate(agent)}
+                onDelete={() => setDeletingAgent(agent)}
+                showAddToWorkspace={mode === "parallel"}
+              />
+            ))
+          )}
+        </div>
       </div>
     </aside>
   );
@@ -390,20 +442,8 @@ function AgentsWorkbench() {
       const mains = detail.mainRuns;
       let started = 0;
       for (const run of mains) {
-        const next: PipelineRun = {
-          ...run,
-          status: "queued",
-          steps: run.steps.map((step) => ({
-            ...step,
-            status: "idle",
-            outputKey: undefined,
-            errorMessage: undefined,
-            durationMs: undefined,
-            lastRunSnapshot: undefined,
-          })),
-        };
         try {
-          await saveMyPipelineRun(token, next);
+          await saveMyPipelineRun(token, resetRunForRedo(run, "queued"));
           started += 1;
         } catch {
           // 单条失败不阻断
@@ -412,7 +452,10 @@ function AgentsWorkbench() {
       queryClient.invalidateQueries({ queryKey: BATCHES_QUERY_KEY });
       queryClient.invalidateQueries({ queryKey: ["my-pipeline-batch", batchId] });
       queryClient.invalidateQueries({ queryKey: ["my-pipeline-runs"] });
-      if (started > 0) {
+      const failed = mains.length - started;
+      if (started > 0 && failed > 0) {
+        message.warning(`已启动 ${started} 条，${failed} 条启动失败，可在批次详情页重试`);
+      } else if (started > 0) {
         message.success(`已启动 ${started} 条主条`);
       } else {
         message.error("启动失败");
@@ -446,7 +489,7 @@ function AgentsWorkbench() {
     queryClient.invalidateQueries({ queryKey: BATCHES_QUERY_KEY });
     queryClient.invalidateQueries({ queryKey: ["my-pipeline-batch", batchId] });
     queryClient.invalidateQueries({ queryKey: ["my-pipeline-runs"] });
-    return ok;
+    return { ok, total: tasks.length };
   };
 
   const handleRedoBatch = (batchId: string, name: string) => {
@@ -458,8 +501,10 @@ function AgentsWorkbench() {
       onOk: async () => {
         setRedoingBatchId(batchId);
         try {
-          const ok = await redoBatchRuns(batchId);
-          if (ok > 0) message.success("已重新排队，稍等会自动开跑");
+          const { ok, total } = await redoBatchRuns(batchId);
+          const failed = total - ok;
+          if (ok > 0 && failed > 0) message.warning(`已重新排队 ${ok} 条，${failed} 条失败，可在批次详情页重试`);
+          else if (ok > 0) message.success("已重新排队，稍等会自动开跑");
           else message.error("重做失败");
         } catch (error) {
           message.error(error instanceof Error ? error.message : "重做失败");

@@ -15,6 +15,7 @@ import {
   downloadPipelineRunZip,
   downloadSingleImage,
   fetchMyPipelineRuns,
+  resetRunForRedo,
   saveMyPipelineRun,
   type PipelineRun,
   type PipelineRunListResponse,
@@ -209,23 +210,10 @@ export function PipelineMode({ agents }: Props) {
     }
   };
 
-  // 构造一份「从头跑」版本：所有步骤重置为 idle，清掉 output / error / lastRunSnapshot，
-  // 整体 status = queued。给单条「执行 / 重新执行」和批量启动共用。
-  // 必须重置 step.status，否则调度器 runRun 看到 `step.status === "success"` 会跳过整步，
-  // 导致「重新执行」无效。outputKey 清空是为了让 UI 立刻显示「等待重跑」而不是仍展示旧产物。
-  // 注：旧 outputKey 对应的图床文件不删，复制 run / 加入素材的图都不受影响。
-  const buildResetRun = (run: PipelineRun): PipelineRun => ({
-    ...run,
-    status: "queued",
-    steps: run.steps.map((step) => ({
-      ...step,
-      status: "idle",
-      outputKey: undefined,
-      errorMessage: undefined,
-      durationMs: undefined,
-      lastRunSnapshot: undefined,
-    })),
-  });
+  // 构造一份「从头跑」版本：所有步骤重置为 idle、清掉 output / error / lastRunSnapshot，整体 status=queued。
+  // 给单条「执行 / 重新执行」和批量启动共用，复用 pipeline-runs 里的 resetRunForRedo（与批量任务重做同一份逻辑）。
+  // 必须重置 step.status，否则调度器 runRun 看到 `step.status === "success"` 会跳过整步，导致「重新执行」无效。
+  const buildResetRun = (run: PipelineRun): PipelineRun => resetRunForRedo(run, "queued");
 
   // 把指定 run 推到 queued 让调度器接管。
   // paused → queued = 首次执行；success / partial / failed → queued = 重新执行（重置所有步骤）。
@@ -271,7 +259,9 @@ export function PipelineMode({ agents }: Props) {
         if (!old) return old;
         return { ...old, items: old.items.map((item) => resetMap.get(item.id) || item) };
       });
-      message.success(`已启动 ${started} 条流程`);
+      const failed = eligible.length - started;
+      if (failed > 0) message.warning(`已启动 ${started} 条，${failed} 条启动失败，可单独重试`);
+      else message.success(`已启动 ${started} 条流程`);
     } else {
       message.error("启动失败");
     }

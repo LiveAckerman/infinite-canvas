@@ -126,29 +126,17 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
       // 串行 PUT 避免一次性几十个并发；调度器最终 cap=3 跑。
       const updated: PipelineRun[] = [];
       for (const run of mains) {
-        const next: PipelineRun = {
-          ...run,
-          status: "queued",
-          steps: run.steps.map((step) => ({
-            ...step,
-            status: "idle",
-            outputKey: undefined,
-            errorMessage: undefined,
-            durationMs: undefined,
-            lastRunSnapshot: undefined,
-          })),
-        };
         try {
-          const saved = await saveMyPipelineRun(token, next);
-          updated.push(saved);
+          updated.push(await saveMyPipelineRun(token, resetRunForRedo(run, "queued")));
         } catch {
           // 单条失败不阻断
         }
       }
-      return updated;
+      return { updated, total: mains.length };
     },
-    onSuccess: (updated) => {
-      if (!updated) return;
+    onSuccess: (result) => {
+      if (!result) return;
+      const { updated, total } = result;
       // 详情 cache + 列表 cache 都同步乐观更新
       queryClient.setQueryData<PipelineBatchDetail>([...BATCHES_QUERY_KEY, batchId], (old) => {
         if (!old) return old;
@@ -161,7 +149,10 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
         return { ...old, items: old.items.map((item) => map.get(item.id) || item) };
       });
       queryClient.invalidateQueries({ queryKey: BATCHES_QUERY_KEY });
-      message.success(`已启动 ${updated.length} 条主条`);
+      const failed = total - updated.length;
+      if (updated.length > 0 && failed > 0) message.warning(`已启动 ${updated.length} 条，${failed} 条启动失败，可对失败主条单独重试`);
+      else if (updated.length > 0) message.success(`已启动 ${updated.length} 条主条`);
+      else message.error("启动失败");
     },
     onError: (error) => {
       message.error(error instanceof Error ? error.message : "启动失败");
@@ -362,7 +353,10 @@ function PipelineBatchDetail({ batchId }: { batchId: string }) {
           });
           queryClient.invalidateQueries({ queryKey: BATCHES_QUERY_KEY });
           queryClient.invalidateQueries({ queryKey: ["my-pipeline-runs"] });
-          message.success("已重新排队，稍等会自动开跑");
+          const failed = mains.length + posts.length - all.length;
+          if (all.length > 0 && failed > 0) message.warning(`已重新排队 ${all.length} 条，${failed} 条失败，可对失败项单独重试`);
+          else if (all.length > 0) message.success("已重新排队，稍等会自动开跑");
+          else message.error("重做失败");
         } catch (error) {
           message.error(error instanceof Error ? error.message : "重做失败");
         } finally {

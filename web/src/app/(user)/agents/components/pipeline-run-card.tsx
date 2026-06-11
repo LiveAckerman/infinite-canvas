@@ -4,6 +4,7 @@ import { ChevronRight, ClipboardPaste, Copy, Download, ImagePlus, Loader2, Play,
 import { App, Button, Checkbox, Image, Tag, Tooltip, Typography } from "antd";
 import { useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent } from "react";
 
+import { formatRelativeTime } from "@/lib/format-datetime";
 import { useImageUploader } from "@/lib/use-image-uploader";
 import { imageUrl } from "@/services/image-storage";
 import type { PipelineRun } from "@/services/api/pipeline-runs";
@@ -136,7 +137,7 @@ export function PipelineRunCard({ run, onOpen, onDownload, onDelete, onDuplicate
   const hiddenCount = Math.max(0, run.steps.length - MAX_STEP_THUMBS);
   const hasAnyOutput = run.steps.some((step) => Boolean(step.outputKey));
   const canDownload = hasAnyOutput;
-  const createdLabel = useMemo(() => formatRelative(run.createdAt), [run.createdAt]);
+  const createdLabel = useMemo(() => formatRelativeTime(run.createdAt), [run.createdAt]);
 
   return (
     <div className={`flex flex-col gap-3 rounded-lg border bg-card p-4 shadow-sm transition hover:shadow-md ${selected && eligible ? "border-blue-400 ring-1 ring-blue-200 dark:border-blue-500 dark:ring-blue-900" : "border-stone-200 dark:border-stone-800"}`}>
@@ -300,17 +301,3 @@ function StepThumb({ url, label, status }: { url: string; label: string; status:
 }
 
 // 「3 分钟前 / 1 小时前 / yyyy-MM-dd」简易相对时间。RFC3339 解析失败兜底显示原字符串。
-function formatRelative(timestamp: string): string {
-  if (!timestamp) return "";
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) return timestamp;
-  const diff = Date.now() - date.getTime();
-  const minute = 60 * 1000;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-  if (diff < minute) return "刚刚";
-  if (diff < hour) return `${Math.floor(diff / minute)} 分钟前`;
-  if (diff < day) return `${Math.floor(diff / hour)} 小时前`;
-  if (diff < 7 * day) return `${Math.floor(diff / day)} 天前`;
-  return date.toLocaleDateString("zh-CN");
-}

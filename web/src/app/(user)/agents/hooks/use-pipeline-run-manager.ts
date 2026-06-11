@@ -24,10 +24,14 @@ export const RUNS_QUERY_KEY = ["my-pipeline-runs"] as const;
 // 前面的跑完才会被 pickQueued 选中。设 3 是为了不让单 tab 一次性把上游打挂。
 const CONCURRENCY_CAP = 3;
 
-// 孤儿 run 的 updatedAt 阈值：超过这个时长没有任何 step PUT 更新，
+// 孤儿 run 的 updatedAt 阈值：超过这个时长没有任何 step PUT / 心跳更新，
 // 即便不是本 tab 的 ownership 也接管恢复（防止跨 tab crash / 跨设备遗留死锁）。
-// 单步生图 30s~2min，5 分钟没动静基本就是孤儿了。
+// 配合下面的心跳：活着的 tab 会持续 bump updatedAt，所以「5 分钟没动静」基本就是真孤儿了。
 const ORPHAN_THRESHOLD_MS = 5 * 60 * 1000;
+
+// 单步运行期间的心跳间隔：runRun 跑某一步时每隔这么久重新 PUT 一次当前 run，
+// 让别的 tab 看到 updatedAt 一直在更新、不会把「活着但慢」的 run 误判成孤儿去接管重跑。
+const HEARTBEAT_MS = 60 * 1000;
 
 // 本 tab 跑 run 的 sessionStorage 标记前缀。sessionStorage 跨刷新保留、跨 tab 隔离、
 // tab 关闭/crash 清空 —— 正好符合「我刷新后接管自己之前在跑的」语义。
@@ -130,10 +134,8 @@ export function usePipelineRunManager({ agents }: Props) {
   const token = useUserStore((state) => state.token);
   // 当前 tab 正在跑的 run id 集合
   const inflightIdsRef = useRef<Set<string>>(new Set());
-  // 取消标记：用户在 detail 页点「停止」时调用 cancel(id) → 该 run 的 runRun 循环检测后退出
-  const cancelledIdsRef = useRef<Set<string>>(new Set());
-  // 用 ref 而不是 state 暴露 inflightIds 给外面看（用 subscriber 通知组件 rerender）
-  const subscribersRef = useRef<Set<() => void>>(new Set());
+  // 防止 scheduleFromCache 在自己写 cache（setQueryData）触发的订阅回调里同步递归重入。
+  const isSchedulingRef = useRef(false);
   // agents 用 ref 跟踪最新引用：runRun / runSingleStep 是异步函数，开始执行时
   // closure 捕获的 agents 可能是 hook 早期 render 的旧引用（agents query 还没回来时 = []）。
   // 在 await 期间 agents 加载完了，但 runRun 内部仍读旧的 agents → 报「角色不存在或已被删除」。
@@ -156,10 +158,6 @@ export function usePipelineRunManager({ agents }: Props) {
     return null;
   };
 
-  const notifySubscribers = () => {
-    subscribersRef.current.forEach((fn) => fn());
-  };
-
   // 取最新 cache 里的 runs；订阅 cache 变化触发调度
   useEffect(() => {
     const cache = queryClient.getQueryCache();
@@ -174,9 +172,22 @@ export function usePipelineRunManager({ agents }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queryClient, token, agents]);
 
-  // 从缓存里挑可启动的 queued run
+  // 从缓存里挑可启动的 queued run。外层包一层重入保护：
+  // scheduleScan 里的 setQueryData(RUNS_QUERY_KEY) 会**同步**触发 cache 订阅回调 → 再调回这里，
+  // 形成「写 cache → 订阅 → 再扫描」的递归。本轮还在扫就直接跳过（本轮用的是 items 快照、会扫完整张表），
+  // 真有新变化时下一次 polling tick / PUT 响应会再次进来调度。
   const scheduleFromCache = () => {
     if (!token) return;
+    if (isSchedulingRef.current) return;
+    isSchedulingRef.current = true;
+    try {
+      scheduleScan();
+    } finally {
+      isSchedulingRef.current = false;
+    }
+  };
+
+  const scheduleScan = () => {
     const data = queryClient.getQueryData<PipelineRunListResponse>(RUNS_QUERY_KEY);
     const items = data?.items || [];
     // 先清理已经跑完的 inflight 标记
@@ -251,7 +262,6 @@ export function usePipelineRunManager({ agents }: Props) {
       inflightIdsRef.current.add(run.id);
       void runRun(run.id);
     }
-    notifySubscribers();
   };
 
   // 主执行循环：拉最新 run → for 每个 idle / failed step → 调上游 → PUT 写回后端
@@ -273,12 +283,6 @@ export function usePipelineRunManager({ agents }: Props) {
       // 逐步跑
       let current = startedRun;
       for (let i = 0; i < current.steps.length; i += 1) {
-        if (cancelledIdsRef.current.has(runId)) {
-          cancelledIdsRef.current.delete(runId);
-          // 标记 paused 让用户后续可以续跑
-          await persistRun({ ...current, status: "paused" });
-          break;
-        }
         const step = current.steps[i];
         if (step.status === "success") continue; // 已成功的跳过（续跑场景）
         // 用 ref + retry 拿 agent，避免 agents query 还没回来时调度器误判「角色不存在」。
@@ -323,6 +327,13 @@ export function usePipelineRunManager({ agents }: Props) {
         await persistRun(current);
         // 跑
         const startedAt = performance.now();
+        // 心跳：单步上游可能跑几分钟（排队 / 504 重试），期间周期性 bump 这条 run 的 updatedAt，
+        // 让别的 tab 不会把「活着但慢」的 run 当成孤儿接管重跑（否则会双跑 → 重复扣费 + 产物互相覆盖）。
+        // tab 真 crash 时心跳停止，updatedAt 超过 ORPHAN_THRESHOLD_MS 才会被安全接管。
+        const heartbeat = window.setInterval(() => {
+          // 只是 bump updatedAt；merge 一次用户可编辑字段，别把用户在跑的当口改的附加说明 / 角色覆盖回旧值。
+          void saveMyPipelineRun(token, mergeUserEditableFields(current)).catch(() => {});
+        }, HEARTBEAT_MS);
         try {
           const result = await invokeStep(token, agent, step.extraNote, inputKeys, i);
           // lastRunSnapshot.inputKey 字段仍是单值。多张时存 join，便于后续做 stale 判断
@@ -341,22 +352,21 @@ export function usePipelineRunManager({ agents }: Props) {
             durationMs: Math.round(performance.now() - startedAt),
           });
           await persistRun(current);
+        } finally {
+          window.clearInterval(heartbeat);
         }
       }
 
       // 终态判定
-      if (!cancelledIdsRef.current.has(runId)) {
-        const successCount = current.steps.filter((step) => step.status === "success").length;
-        const failedCount = current.steps.filter((step) => step.status === "failed").length;
-        const finalStatus = failedCount === 0 ? "success" : successCount === 0 ? "failed" : "partial";
-        await persistRun({ ...current, status: finalStatus });
-      }
+      const successCount = current.steps.filter((step) => step.status === "success").length;
+      const failedCount = current.steps.filter((step) => step.status === "failed").length;
+      const finalStatus = failedCount === 0 ? "success" : successCount === 0 ? "failed" : "partial";
+      await persistRun({ ...current, status: finalStatus });
     } finally {
       inflightIdsRef.current.delete(runId);
       // 释放 ownership 标记：跑到终态了，下次刷新不再需要恢复这条 run。
-      // 中途 cancel / 抛错走 finally 也都释放，避免标记常驻 sessionStorage。
+      // 抛错走 finally 也释放，避免标记常驻 sessionStorage。
       unmarkRunOwned(runId);
-      notifySubscribers();
       // 触发一次调度，看有没有 queued 等着上
       scheduleFromCache();
     }
@@ -429,20 +439,6 @@ export function usePipelineRunManager({ agents }: Props) {
       // PUT 失败：本地 cache 已经乐观更新过，不强行回滚（用户可能在等结果，回滚反而更不自然）
     }
   };
-
-  // 手动取消：把 runId 标记到 cancelledIdsRef，runRun 循环到下一步前会跳出
-  const cancel = (runId: string) => {
-    if (inflightIdsRef.current.has(runId)) {
-      cancelledIdsRef.current.add(runId);
-    }
-  };
-
-  // 让外面（如顶部状态条）能看到当前在跑的 run id 集合 + 在跑数量
-  const subscribe = (fn: () => void) => {
-    subscribersRef.current.add(fn);
-    return () => subscribersRef.current.delete(fn);
-  };
-  const getInflightIds = () => Array.from(inflightIdsRef.current);
 
   // 详情页用：单步重做。不走 queued / cap 限制 —— 用户在详情页主动触发的微调
   // 应该立即响应，且只跑这一步不影响其它步。下游 stale 状态由用户后续手动点重做来推进。
@@ -568,9 +564,6 @@ export function usePipelineRunManager({ agents }: Props) {
 
   return {
     cap: CONCURRENCY_CAP,
-    cancel,
-    getInflightIds,
-    subscribe,
     runSingleStep,
     restartFromQueued,
   };
