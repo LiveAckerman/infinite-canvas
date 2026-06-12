@@ -80,9 +80,15 @@ func SaveMyAgentWorkstationCard(userID string, item model.AgentWorkstationCard) 
 		item.Status = model.AgentWorkstationCardStatusIdle
 	}
 	if item.Status != model.AgentWorkstationCardStatusIdle &&
+		item.Status != model.AgentWorkstationCardStatusRunning &&
 		item.Status != model.AgentWorkstationCardStatusSuccess &&
 		item.Status != model.AgentWorkstationCardStatusFailed {
-		return item, errors.New("卡片状态非法（running 不入库）")
+		return item, errors.New("卡片状态非法")
+	}
+	// running 必须带 RunningGenerationID（指向那条 generation）；非 running 一律清空，避免脏数据
+	// 串到下一次跑（重做 / 重置 / 终态都应清空）。
+	if item.Status != model.AgentWorkstationCardStatusRunning {
+		item.RunningGenerationID = ""
 	}
 
 	now := time.Now().Format(time.RFC3339)

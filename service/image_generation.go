@@ -69,6 +69,10 @@ type StartGenerationInput struct {
 	Count      int      `json:"count"`      // 本次要生成几张（新建=总数；追加=新增数）
 	References []string `json:"references"` // 图生图参考图 storageKey
 	ParentID   string   `json:"parentId"`   // 微调来源
+	// AgentID 当这条 generation 来自角色工作台时由前端传入，让记录归属到那个角色；
+	// 后续 /api/generations 列表可按 agentId / hasAgent / excludeAgent 过滤。
+	// 只对新建路径生效，追加路径不变（追加是给同一条 generation 补槽，agent 归属不会变）。
+	AgentID string `json:"agentId"`
 }
 
 // StartImageGeneration 创建 / 追加一条 running 生图记录并起后台任务，立即返回该记录。
@@ -108,6 +112,13 @@ func StartImageGeneration(userID string, in StartGenerationInput) (model.Generat
 			return model.Generation{}, errors.New("参考图无权访问或不存在")
 		}
 	}
+	// 角色归属校验：传了 agentId 就必须属于当前用户，避免把别人的角色 id 塞进自己的记录。
+	if in.AgentID != "" {
+		agent, ok, err := repository.GetAgentByID(in.AgentID)
+		if err != nil || !ok || agent.UserID != userID {
+			return model.Generation{}, errors.New("角色不存在或无权访问")
+		}
+	}
 
 	if in.ID == "" {
 		// 计数检查 + 建记录 + 起 worker 整段放进锁，避免并发 /run 都看到未超限而突破上限。
@@ -139,6 +150,7 @@ func StartImageGeneration(userID string, in StartGenerationInput) (model.Generat
 				"referenceCount": len(refs),
 				"backendJob":     true,
 			},
+			AgentID: in.AgentID,
 			ParentID:  in.ParentID,
 			CreatedAt: now(),
 		}

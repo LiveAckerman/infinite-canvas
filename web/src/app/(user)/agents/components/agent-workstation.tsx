@@ -3,19 +3,18 @@
 import { ChevronDown, ChevronUp, Download, FolderPlus, LoaderCircle, RotateCw, Sparkles, X } from "lucide-react";
 import { App, Button, Image, Input, Tag } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 
 import { defaultConfig } from "@/lib/ai-config";
-import { formatDuration, readImageMeta } from "@/lib/image-utils";
+import { formatDuration } from "@/lib/image-utils";
 import { PromptImproveBar } from "@/components/prompt-improve-panel";
 import { ReferenceImagesField } from "@/components/reference-images-field";
 import type { AgentWorkstationCard } from "@/services/api/agent-workstations";
-import { saveGeneration } from "@/services/api/generations";
-import { requestEdit, requestGeneration, type GeneratedImage as GeneratedImagePayload } from "@/services/api/image";
+import { fetchGeneration, runGeneration } from "@/services/api/generations";
 import { saveMyAsset } from "@/services/api/my-assets";
-import { imageUrl, uploadImage } from "@/services/image-storage";
+import { imageUrl } from "@/services/image-storage";
 import type { Agent } from "@/services/api/agents";
 import { useUserStore } from "@/stores/use-user-store";
-import type { ReferenceImage } from "@/types/image";
 
 import { AgentAvatar } from "./agent-avatar";
 
@@ -31,12 +30,14 @@ type WorkstationResult = {
 };
 
 // 父层 PUT 写回数据库的 patch payload。referenceKeys 传空数组显式清空，outputKey / errorMessage 用空串。
-// status: 'running' 不入库（页面挂掉后没法续跑，恢复时全部按 idle）。
+// status: "running" 现在入库——指向后端任务化生图的那条 generation（runningGenerationId），
+// 刷新 / 切走再回来都能据此续上轮询，不再丢进度。
 export type WorkstationCardPatch = {
   referenceKeys?: string[];
   extraNote?: string;
   outputKey?: string;
-  status?: "idle" | "success" | "failed";
+  status?: "idle" | "running" | "success" | "failed";
+  runningGenerationId?: string;
   errorMessage?: string;
   durationMs?: number;
 };
@@ -68,11 +69,17 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
   // 不再监听 initialCard 的变化（避免父层缓存刷新触发的 hydrate 把用户当前输入回滚）。
   const [referenceKeys, setReferenceKeys] = useState<string[]>(() => initialCard?.referenceKeys?.filter(Boolean) || []);
   const [extraNote, setExtraNote] = useState(initialCard?.extraNote || "");
-  // server 端的 running 不入库，恢复时全部按 idle 渲染
-  const [status, setStatus] = useState<WorkstationStatus>(
-    initialCard?.status === "success" ? "success"
-    : initialCard?.status === "failed" ? "failed"
-    : "idle",
+  // running 入库了：hydrate 时也保留 running 状态，下面的 useQuery 会按 runningGenerationId 自动续上轮询，
+  // 实现「刷新页面 / 切走再回来都能续上进度」。runningGenerationId 缺失的 running 状态视为脏数据，按 idle 兜底。
+  const [status, setStatus] = useState<WorkstationStatus>(() => {
+    if (initialCard?.status === "running" && initialCard?.runningGenerationId) return "running";
+    if (initialCard?.status === "success") return "success";
+    if (initialCard?.status === "failed") return "failed";
+    return "idle";
+  });
+  // 后端任务化生图：status=running 时关联的那条 generation id，前端按它轮询拿进度。
+  const [runningGenerationId, setRunningGenerationId] = useState<string>(
+    initialCard?.status === "running" ? (initialCard?.runningGenerationId || "") : "",
   );
   const [errorMessage, setErrorMessage] = useState(initialCard?.errorMessage || "");
   const [result, setResult] = useState<WorkstationResult | null>(() => {
@@ -108,11 +115,84 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
     });
   };
 
+  // 计时器：hydrate 出来的 running 状态 startedAtRef 还是 0，effect 启动时若为 0 就用「现在」做起点，
+  // 至少能看到从打开页面到完成的耗时（真正起点要查 generation.createdAt 才能拿到，太啰嗦不值得）。
   useEffect(() => {
     if (status !== "running") return;
+    if (!startedAtRef.current) startedAtRef.current = performance.now();
     const timer = window.setInterval(() => setElapsedMs(performance.now() - startedAtRef.current), 500);
     return () => window.clearInterval(timer);
   }, [status]);
+
+  // 后端任务化生图轮询：status=running 且 runningGenerationId 非空时，2s 拉一次 generation 看进度。
+  // 拿到终态 → 把结果同步到本地 + PUT 回卡片；上游 worker 跑完会把 generation.status 收敛成 success/failed/partial。
+  const generationQuery = useQuery({
+    queryKey: ["my-generation", runningGenerationId],
+    queryFn: () => fetchGeneration(token, runningGenerationId),
+    enabled: Boolean(token) && status === "running" && Boolean(runningGenerationId),
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      return data && data.status !== "running" ? false : 2000;
+    },
+    refetchOnWindowFocus: true,
+    retry: false,
+    staleTime: 0,
+  });
+
+  useEffect(() => {
+    const gen = generationQuery.data;
+    if (!gen) return;
+    if (status !== "running") return;
+    if (gen.status === "running") return;
+    // 终态收敛：success / partial（角色工作台 n=1 不会出 partial 但兜一下）/ failed
+    if (gen.status === "success" || gen.status === "partial") {
+      const outputKey = gen.thumbnails && gen.thumbnails[0] ? gen.thumbnails[0] : "";
+      if (!outputKey) {
+        // 后端说成功了但没产物 —— 当 failed 兜底处理，不让卡片永远卡 running
+        setStatus("failed");
+        setErrorMessage("生成完成但没拿到产物图");
+        onPersistCard?.({ status: "failed", errorMessage: "生成完成但没拿到产物图", outputKey: "", runningGenerationId: "" });
+        setRunningGenerationId("");
+        return;
+      }
+      const durationMs = gen.durationMs || (startedAtRef.current ? performance.now() - startedAtRef.current : 0);
+      setResult({
+        id: `gen-${gen.id}-0`,
+        url: imageUrl(outputKey),
+        storageKey: outputKey,
+        width: 0,
+        height: 0,
+        durationMs,
+      });
+      setStatus("success");
+      setErrorMessage("");
+      onUsed();
+      onPersistCard?.({
+        status: "success",
+        outputKey,
+        errorMessage: "",
+        durationMs: Math.round(durationMs),
+        runningGenerationId: "",
+      });
+      setRunningGenerationId("");
+      onGenerationSaved?.();
+      return;
+    }
+    // failed
+    const msg = (gen.errors && gen.errors[0]) || "生成失败";
+    setStatus("failed");
+    setErrorMessage(msg);
+    onPersistCard?.({
+      status: "failed",
+      errorMessage: msg,
+      outputKey: "",
+      durationMs: gen.durationMs || Math.round(startedAtRef.current ? performance.now() - startedAtRef.current : 0),
+      runningGenerationId: "",
+    });
+    setRunningGenerationId("");
+    onGenerationSaved?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [generationQuery.data]);
 
   // 卸载时清理 extraNote 防抖计时器，避免组件销毁后还 PUT 一次。
   useEffect(() => () => {
@@ -142,6 +222,9 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
     return `${base}\n\n补充说明：${extra}`;
   }, [agent.systemPrompt, extraNote]);
 
+  // 后端任务化生图：发起一条 running generation 立刻入库，worker 后台跑；本地 status=running、
+  // 把 generation.id 持久化到卡片的 runningGenerationId。之后由 generationQuery 轮询拿进度，
+  // 终态由 useEffect 收敛。刷新页面 / 切走再回来都能据此续上 —— 不再丢进度。
   const generate = async () => {
     if (!token) {
       message.error("请先登录");
@@ -151,19 +234,9 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
       message.error("当前角色的系统提示词为空，请先编辑角色");
       return;
     }
-    setStatus("running");
-    setErrorMessage("");
-    setElapsedMs(0);
-    startedAtRef.current = performance.now();
-    const config = {
-      size: agent.defaultSize || defaultConfig.size,
-      quality: agent.defaultQuality || defaultConfig.quality,
-      count: "1",
-    };
-    // 把「角色绑定的固定参考图（最多 3 张）」和「用户在卡片上传的原图（最多 9 张）」拼成 references 一起发给模型。
+    // 把「角色绑定的固定参考图（最多 3 张）」和「用户在卡片上传的原图（最多 9 张）」拼成 references。
     // 角色参考图按设置顺序排在前（先验风格 / 构图参考），用户原图在后（要被处理的目标）。
-    // 模型 /v1/images/edits 上限 9 张，相加超过时按「先角色后用户」截断并提示。
-    // 任一非空就走 /v1/images/edits；两者都空才回落到纯文生图 /generations。
+    // 上游 /v1/images/edits 最多 9 张，相加超过按「先角色后用户」截断并提示。
     const MAX_EDIT_REFERENCES = 9;
     const agentRefKeys = (agent.referenceImageKeys || []).filter(Boolean);
     let combinedKeys = [...agentRefKeys, ...referenceKeys.filter(Boolean)];
@@ -171,111 +244,48 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
       message.warning(`参考图最多 ${MAX_EDIT_REFERENCES} 张（含角色固定参考图），已自动取前 ${MAX_EDIT_REFERENCES} 张`);
       combinedKeys = combinedKeys.slice(0, MAX_EDIT_REFERENCES);
     }
-    const references: ReferenceImage[] = combinedKeys.map((key, index) => ({
-      id: `ref-${agent.id}-${index}-${key}`,
-      name: index < agentRefKeys.length ? `${agent.name}-参考图` : "原图",
-      type: "image/*",
-      dataUrl: imageUrl(key),
-      storageKey: key,
-    }));
+    const mode = combinedKeys.length ? "edit" : "image";
+    const size = agent.defaultSize || defaultConfig.size;
+    const quality = agent.defaultQuality || defaultConfig.quality;
 
-    const mode = references.length ? "edit" : "image";
-    const referenceStorageKeys = combinedKeys;
-    const requestParams: Record<string, unknown> = {
-      mode,
-      n: 1,
-      size: config.size,
-      quality: config.quality,
-      referenceCount: references.length,
-      via: "agent-workstation",
-    };
+    // 先切本地 running + 起本地计时器，再 POST；只有 POST 失败才回退到 failed。
+    setStatus("running");
+    setErrorMessage("");
+    setElapsedMs(0);
+    setResult(null);
+    startedAtRef.current = performance.now();
+
     try {
-      const res = references.length
-        ? await requestEdit(token, config, composedPrompt, references)
-        : await requestGeneration(token, config, composedPrompt);
-      const first: GeneratedImagePayload | undefined = res.images[0];
-      if (!first) throw new Error("接口没有返回图片");
-      const stored = await uploadImage(first.dataUrl);
-      let width = 0;
-      let height = 0;
-      try {
-        const meta = await readImageMeta(stored.url);
-        width = meta.width;
-        height = meta.height;
-      } catch {
-        // meta 读取失败不致命
-      }
-      const durationMs = performance.now() - startedAtRef.current;
-      setResult({
-        id: first.id,
-        url: stored.url,
-        storageKey: stored.storageKey,
-        width,
-        height,
-        durationMs,
-      });
-      setStatus("success");
-      onUsed();
-      // 把结果 PUT 到 workstation_cards，下次进同账号能直接看到这张产物图。
-      onPersistCard?.({
-        status: "success",
-        outputKey: stored.storageKey,
-        errorMessage: "",
-        durationMs: Math.round(durationMs),
-      });
-      // 落一条 generations 记录，让「生成记录」Drawer 看得到；带 agentId 方便按角色筛选。
-      // 失败不阻断主流程，弹消息即可。
-      saveGeneration(token, {
+      const record = await runGeneration(token, {
         prompt: composedPrompt,
         mode,
-        model: "",
-        size: config.size,
-        quality: config.quality,
+        size,
+        quality,
         count: 1,
-        successCount: 1,
-        failCount: 0,
-        durationMs,
-        status: "success",
-        thumbnails: stored.storageKey ? [stored.storageKey] : [],
-        references: referenceStorageKeys,
-        errors: [],
-        requestParams,
-        upstreamMeta: res.upstreamMeta || "",
+        references: combinedKeys,
         agentId: agent.id,
-      }).then(() => onGenerationSaved?.()).catch(() => {
-        // 写库失败只是没法在 Drawer 里看到这一条，不影响用户拿到图，静默。
       });
+      setRunningGenerationId(record.id);
+      // 立即 PUT 一次，把 running + runningGenerationId 落库 —— 刷新页面也能据此续上轮询。
+      onPersistCard?.({
+        status: "running",
+        runningGenerationId: record.id,
+        outputKey: "",
+        errorMessage: "",
+        durationMs: 0,
+      });
+      onUsed();
+      onGenerationSaved?.();
     } catch (error) {
-      const msg = error instanceof Error ? error.message : "生成失败";
-      setErrorMessage(msg);
+      const msg = error instanceof Error ? error.message : "发起生成失败";
       setStatus("failed");
-      // 同步把 failed 状态 + 错误信息推到 workstation_cards，下次进可以看到上次失败原因，方便重试。
+      setErrorMessage(msg);
       onPersistCard?.({
         status: "failed",
         errorMessage: msg,
         outputKey: "",
+        runningGenerationId: "",
         durationMs: Math.round(performance.now() - startedAtRef.current),
-      });
-      // 失败也写一条记录，方便 Drawer 里复盘错误。
-      saveGeneration(token, {
-        prompt: composedPrompt,
-        mode,
-        model: "",
-        size: config.size,
-        quality: config.quality,
-        count: 1,
-        successCount: 0,
-        failCount: 1,
-        durationMs: performance.now() - startedAtRef.current,
-        status: "failed",
-        thumbnails: [],
-        references: referenceStorageKeys,
-        errors: [msg],
-        requestParams,
-        upstreamMeta: "",
-        agentId: agent.id,
-      }).then(() => onGenerationSaved?.()).catch(() => {
-        // ignore
       });
     }
   };
@@ -311,13 +321,15 @@ export function AgentWorkstation({ agent, onRemove, onEdit, onUsed, onGeneration
     setResult(null);
     setErrorMessage("");
     setElapsedMs(0);
-    // 把 outputKey / errorMessage / durationMs / status 都重置回 idle，
+    setRunningGenerationId("");
+    // 把 outputKey / errorMessage / durationMs / status / runningGenerationId 都重置回 idle，
     // 下次进卡片就是干净的「待生成」状态。reference / extraNote 保留不动。
     onPersistCard?.({
       status: "idle",
       outputKey: "",
       errorMessage: "",
       durationMs: 0,
+      runningGenerationId: "",
     });
   };
 

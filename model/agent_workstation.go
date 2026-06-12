@@ -1,11 +1,13 @@
 package model
 
-// AgentWorkstationCardStatus 跟前端 WorkstationStatus 对齐（除掉 running，
-// running 不入库——页面挂掉后 task 没法续跑，恢复时全部按 idle）。
+// AgentWorkstationCardStatus 跟前端 WorkstationStatus 对齐。
+// running：后端任务驱动模式下，task 真的在后端跑（关联 RunningGenerationID 指向那条 generation），
+// 页面刷新后照样能查到状态、续上轮询，不再丢进度。
 type AgentWorkstationCardStatus string
 
 const (
 	AgentWorkstationCardStatusIdle    AgentWorkstationCardStatus = "idle"
+	AgentWorkstationCardStatusRunning AgentWorkstationCardStatus = "running"
 	AgentWorkstationCardStatusSuccess AgentWorkstationCardStatus = "success"
 	AgentWorkstationCardStatusFailed  AgentWorkstationCardStatus = "failed"
 )
@@ -23,6 +25,9 @@ type AgentWorkstationCard struct {
 	ExtraNote     string                     `json:"extraNote,omitempty"`
 	OutputKey     string                     `json:"outputKey,omitempty"`
 	Status        AgentWorkstationCardStatus `json:"status"`
+	// RunningGenerationID Status=running 时关联的那条 generation id（POST /api/generations/run 返回）。
+	// 前端轮询这条 generation 拿进度；刷新 / 切走再回来都能据此续上轮询。终态时清空。
+	RunningGenerationID string `json:"runningGenerationId,omitempty"`
 	ErrorMessage  string                     `json:"errorMessage,omitempty"`
 	DurationMs    int                        `json:"durationMs,omitempty"`
 	CreatedAt     string                     `json:"createdAt"`

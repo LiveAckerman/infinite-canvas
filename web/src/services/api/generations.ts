@@ -69,7 +69,8 @@ export type SaveGenerationPayload = {
   agentId?: string;
 };
 
-// 后端任务化生图发起入参。id 非空 = 追加到已有记录（二次生成累加）；parentId = 微调来源。
+// 后端任务化生图发起入参。id 非空 = 追加到已有记录（二次生成累加）；parentId = 微调来源；
+// agentId 由角色工作台传入，让记录归属到那个角色，方便按 agent 过滤。
 export type RunGenerationPayload = {
   id?: string;
   prompt: string;
@@ -79,6 +80,7 @@ export type RunGenerationPayload = {
   count: number;
   references: string[];
   parentId?: string;
+  agentId?: string;
 };
 
 export async function fetchGenerations(token: string, query: GenerationQuery = {}) {
