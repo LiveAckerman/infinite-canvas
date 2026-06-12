@@ -24,6 +24,11 @@ type Config struct {
 	R2SecretAccessKey string `env:"R2_SECRET_ACCESS_KEY"`
 	R2Bucket          string `env:"R2_BUCKET"`
 	R2Region          string `env:"R2_REGION" envDefault:"auto"`
+	// 设置后 GET /api/images/:id 不再从 R2 代理流二进制，而是直接 302 重定向到
+	// `${ImageCDNBase}/${image.Path}`。配合 Cloudflare R2 自定义域 + 边缘缓存，
+	// 国内用户拉历史图基本走 HK POP，几十到几百毫秒。形如 https://cdn.lijiwang.top
+	// （末尾不要带斜杠；带了也会被去掉）。
+	ImageCDNBase string `env:"IMAGE_CDN_BASE"`
 }
 
 var Cfg Config

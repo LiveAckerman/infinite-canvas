@@ -4,7 +4,9 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
+	"github.com/basketikun/infinite-canvas/config"
 	"github.com/basketikun/infinite-canvas/service"
 )
 
@@ -50,10 +52,19 @@ func UploadImage(w http.ResponseWriter, r *http.Request) {
 
 // GetImage 流式返回图片二进制；id 是 uuid 不可枚举，因此走公开访问，方便 <img src> 直链。
 // 二进制由 storage 后端（local / r2）提供，handler 无需关心是磁盘还是远程对象。
+//
+// 配置了 IMAGE_CDN_BASE 时，不再走 VPS 代理 —— 直接 302 重定向到 CDN 域名（CF R2 自定义域），
+// 让浏览器直接从最近的 CDN POP 拉图。重定向本身 Cache-Control 一天，所以新图第二次起
+// 浏览器走缓存，连 302 都省了。
 func GetImage(w http.ResponseWriter, r *http.Request, id string) {
 	image, err := service.GetImage(id)
 	if err != nil {
 		Fail(w, err.Error())
+		return
+	}
+	if base := strings.TrimRight(strings.TrimSpace(config.Cfg.ImageCDNBase), "/"); base != "" && image.Path != "" {
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		http.Redirect(w, r, base+"/"+image.Path, http.StatusFound)
 		return
 	}
 	rc, _, err := service.OpenImageObject(image)
