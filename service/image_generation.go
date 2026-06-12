@@ -11,7 +11,6 @@ import (
 	"log"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -567,17 +566,20 @@ func imageGenEditUpstream(ctx context.Context, cfg model.AIConfig, gen model.Gen
 		if err != nil {
 			return nil, 0, errors.New("参考图无权访问或不存在")
 		}
-		file, err := os.Open(ImageAbsPath(image))
+		rc, _, err := OpenImageObject(image)
 		if err != nil {
-			return nil, 0, errors.New("参考图文件丢失")
+			if IsImageNotFound(err) {
+				return nil, 0, errors.New("参考图文件丢失")
+			}
+			return nil, 0, errors.New("参考图读取失败")
 		}
 		part, err := writer.CreateFormFile("image", filepath.Base(image.Path))
 		if err != nil {
-			_ = file.Close()
+			_ = rc.Close()
 			return nil, 0, err
 		}
-		_, copyErr := io.Copy(part, file)
-		_ = file.Close()
+		_, copyErr := io.Copy(part, rc)
+		_ = rc.Close()
 		if copyErr != nil {
 			return nil, 0, errors.New("参考图读取失败")
 		}

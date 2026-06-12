@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -224,12 +223,11 @@ func addImageToZip(zw *zip.Writer, storageKey string, nameHint string) error {
 	if err != nil {
 		return err
 	}
-	absPath := ImageAbsPath(image)
-	f, err := os.Open(absPath)
+	rc, _, err := OpenImageObject(image)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer rc.Close()
 	ext := filepath.Ext(image.Path)
 	if ext == "" {
 		ext = extFromMime(image.MimeType)
@@ -238,7 +236,7 @@ func addImageToZip(zw *zip.Writer, storageKey string, nameHint string) error {
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(entry, f)
+	_, err = io.Copy(entry, rc)
 	return err
 }
 

@@ -1,11 +1,12 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"mime"
-	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/basketikun/infinite-canvas/config"
 	"github.com/basketikun/infinite-canvas/model"
@@ -40,12 +41,15 @@ func SaveImage(userID string, data []byte, mimeType string) (model.Image, error)
 		mimeType = "image/png"
 	}
 	id := newID("img")
-	relPath := filepath.Join(safeUserDir(userID), id+extFromMime(mimeType))
-	absPath := filepath.Join(config.Cfg.ImageDir, relPath)
-	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+	// 相对 key（同时是 local 后端的相对路径、r2 后端的对象 key）。slash 一律 forward。
+	key := filepath.ToSlash(filepath.Join(safeUserDir(userID), id+extFromMime(mimeType)))
+	store, err := ImageStore()
+	if err != nil {
 		return model.Image{}, err
 	}
-	if err := os.WriteFile(absPath, data, 0o644); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := store.Put(ctx, key, data, mimeType); err != nil {
 		return model.Image{}, err
 	}
 	image := model.Image{
@@ -53,13 +57,13 @@ func SaveImage(userID string, data []byte, mimeType string) (model.Image, error)
 		UserID:    userID,
 		MimeType:  mimeType,
 		Size:      len(data),
-		Path:      filepath.ToSlash(relPath),
+		Path:      key,
 		CreatedAt: now(),
 	}
 	saved, err := repository.SaveImage(image)
 	if err != nil {
-		// DB 写失败回滚已落盘文件，避免悬空文件
-		_ = os.Remove(absPath)
+		// DB 写失败回滚已落盘 / 已上传的对象，避免悬空文件
+		_ = store.Delete(context.Background(), key)
 		return model.Image{}, err
 	}
 	return saved, nil
@@ -78,8 +82,12 @@ func GetImage(id string) (model.Image, error) {
 	return image, nil
 }
 
-// ImageAbsPath 返回图片在磁盘上的绝对路径。
+// ImageAbsPath 仅 local 后端有意义；R2 时返回空串，调用方应改用 OpenImageObject。
+// 保留是为了兼容历史调用点（已逐步替换成 OpenImageObject）。
 func ImageAbsPath(image model.Image) string {
+	if strings.ToLower(config.Cfg.ImageBackend) == "r2" {
+		return ""
+	}
 	return filepath.Join(config.Cfg.ImageDir, filepath.FromSlash(image.Path))
 }
 
@@ -118,13 +126,17 @@ func DeleteImage(userID string, id string) error {
 }
 
 // deleteImageInternal 不做 owner 校验的删除（供 admin 孤儿清理、级联删除等使用）。
-// 同步删 DB 行 + 磁盘文件，文件不存在不报错。
+// 同步删 DB 行 + 存储后端对象，对象不存在不报错。
 func deleteImageInternal(image model.Image) error {
 	if err := repository.DeleteImage(image.ID); err != nil {
 		return err
 	}
 	if image.Path != "" {
-		_ = os.Remove(ImageAbsPath(image))
+		if store, err := ImageStore(); err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_ = store.Delete(ctx, image.Path)
+			cancel()
+		}
 	}
 	return nil
 }

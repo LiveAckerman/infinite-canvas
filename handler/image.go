@@ -3,7 +3,6 @@ package handler
 import (
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 
 	"github.com/basketikun/infinite-canvas/service"
@@ -50,23 +49,28 @@ func UploadImage(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetImage 流式返回图片二进制；id 是 uuid 不可枚举，因此走公开访问，方便 <img src> 直链。
+// 二进制由 storage 后端（local / r2）提供，handler 无需关心是磁盘还是远程对象。
 func GetImage(w http.ResponseWriter, r *http.Request, id string) {
 	image, err := service.GetImage(id)
 	if err != nil {
 		Fail(w, err.Error())
 		return
 	}
-	absPath := service.ImageAbsPath(image)
-	file, err := os.Open(absPath)
+	rc, _, err := service.OpenImageObject(image)
 	if err != nil {
-		Fail(w, "图片文件丢失")
+		if service.IsImageNotFound(err) {
+			Fail(w, "图片文件丢失")
+		} else {
+			Fail(w, "图片读取失败")
+		}
 		return
 	}
-	defer file.Close()
+	defer rc.Close()
 	w.Header().Set("Content-Type", image.MimeType)
+	// DB 里的 Size 是落盘 / 上传时的字节数，跟实际对象一致。R2 也会带 Content-Length，但 DB 这个稳。
 	w.Header().Set("Content-Length", strconv.Itoa(image.Size))
 	w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
-	_, _ = io.Copy(w, file)
+	_, _ = io.Copy(w, rc)
 }
 
 func DeleteImage(w http.ResponseWriter, r *http.Request, id string) {

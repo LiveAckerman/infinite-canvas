@@ -10,7 +10,6 @@ import (
 	"log"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -703,20 +702,24 @@ func writeEditsFromJSON(w http.ResponseWriter, r *http.Request, user model.AuthU
 			Fail(w, err.Error())
 			return false
 		}
-		file, err := os.Open(service.ImageAbsPath(image))
+		rc, _, err := service.OpenImageObject(image)
 		if err != nil {
-			Fail(w, "参考图文件丢失")
+			if service.IsImageNotFound(err) {
+				Fail(w, "参考图文件丢失")
+			} else {
+				Fail(w, "参考图读取失败")
+			}
 			return false
 		}
 		filename := filepath.Base(image.Path)
 		part, err := writer.CreateFormFile("image", filename)
 		if err != nil {
-			_ = file.Close()
+			_ = rc.Close()
 			Fail(w, "请求构造失败")
 			return false
 		}
-		_, copyErr := io.Copy(part, file)
-		_ = file.Close()
+		_, copyErr := io.Copy(part, rc)
+		_ = rc.Close()
 		if copyErr != nil {
 			Fail(w, "参考图读取失败")
 			return false
