@@ -4,8 +4,7 @@ import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { defaultConfig } from "@/lib/ai-config";
-import { requestEdit, requestGeneration } from "@/services/api/image";
-import { imageUrl, uploadImage } from "@/services/image-storage";
+import { runAndAwaitGeneration } from "@/lib/run-and-await-generation";
 import type { Agent } from "@/services/api/agents";
 import {
   saveMyPipelineRun,
@@ -16,7 +15,6 @@ import {
   type PipelineRunStep,
 } from "@/services/api/pipeline-runs";
 import { useUserStore } from "@/stores/use-user-store";
-import type { ReferenceImage } from "@/types/image";
 
 export const RUNS_QUERY_KEY = ["my-pipeline-runs"] as const;
 
@@ -569,47 +567,39 @@ export function usePipelineRunManager({ agents }: Props) {
   };
 }
 
-// 内部执行一次图生图 → 上传产物，返回新 storageKey。封装来给 runRun / runSingleStep 共用。
+// 内部执行一次图生图，返回新 storageKey。封装来给 runRun / runSingleStep 共用。
 // inputKeys 是这一步要喂给上游的产物 storageKey 数组：main run 永远只传 1 张；
 // post run 第一步可能传多张（同 batch 各 main run 的指定步产物）。
+//
+// 跑后端任务化生图 —— /api/generations/run + 轮询 fetchGeneration。这样：
+//   - 失败 / 上游错误信息走统一的中文友好转译；
+//   - 这一步生成的图同步落 generations 表（带 agentId），records drawer 能看到；
+//   - credits 按真实出图扣（worker 内做的，跟 /image 一致）。
+// 注：refresh-during-step 的恢复仍靠 hook 自身的 ownership / orphan 机制；
+// 把 generation.id 落到 step.runningGenerationId 是更彻底的修复，留待后续。
 async function invokeStep(token: string, agent: Agent, extraNote: string, inputKeys: string[], index: number): Promise<{ outputKey: string }> {
   const composedPrompt = extraNote.trim()
     ? `${agent.systemPrompt.trim()}\n\n补充说明：${extraNote.trim()}`
     : agent.systemPrompt.trim();
-  const references: ReferenceImage[] = [];
+  // 先角色固定参考图（先验风格），再 inputs（要被处理的目标），跟老版本顺序一致。
+  const referenceKeys: string[] = [];
   for (const key of agent.referenceImageKeys || []) {
-    if (!key) continue;
-    references.push({
-      id: `agent-ref-${agent.id}-${key}`,
-      name: `${agent.name}-参考图`,
-      type: "image/*",
-      dataUrl: imageUrl(key),
-      storageKey: key,
-    });
+    if (key) referenceKeys.push(key);
   }
-  for (let i = 0; i < inputKeys.length; i += 1) {
-    const key = inputKeys[i];
-    if (!key) continue;
-    references.push({
-      id: `pipeline-step-input-${index}-${i}`,
-      name: `输入 ${i + 1}`,
-      type: "image/*",
-      dataUrl: imageUrl(key),
-      storageKey: key,
-    });
+  for (const key of inputKeys) {
+    if (key) referenceKeys.push(key);
   }
-  const config = {
+  void index; // 仅保留签名兼容（旧版本用于命名 reference）。
+  const { storageKey } = await runAndAwaitGeneration(token, {
+    prompt: composedPrompt,
+    mode: referenceKeys.length ? "edit" : "image",
     size: agent.defaultSize || defaultConfig.size,
     quality: agent.defaultQuality || defaultConfig.quality,
-    count: "1",
-  };
-  const res = references.length
-    ? await requestEdit(token, config, composedPrompt, references)
-    : await requestGeneration(token, config, composedPrompt);
-  const first = res.images[0];
-  if (!first) throw new Error("接口没有返回图片");
-  const stored = await uploadImage(first.dataUrl);
-  return { outputKey: stored.storageKey };
+    count: 1,
+    references: referenceKeys,
+    agentId: agent.id,
+  });
+  return { outputKey: storageKey };
 }
 
 // 解析 post run 的 sourceRefs：把每个 ref 指向的「主条 runId + stepIndex」翻译成实际的 storageKey 数组。

@@ -10,12 +10,12 @@ import type { AiConfig } from "@/lib/ai-config";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { createId } from "@/lib/id";
 import { cn } from "@/lib/utils";
-import { requestEdit, requestGeneration, requestImageQuestion, type ChatCompletionMessage } from "@/services/api/image";
-import { imageToDataUrl, uploadImage } from "@/services/image-storage";
+import { runAndAwaitGeneration } from "@/lib/run-and-await-generation";
+import { requestImageQuestion, type ChatCompletionMessage } from "@/services/api/image";
+import { imageToDataUrl, imageUrl } from "@/services/image-storage";
 import { useAiConfigStore } from "@/stores/use-ai-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useUserStore } from "@/stores/use-user-store";
-import type { ReferenceImage } from "@/types/image";
 import { DiaTextReveal } from "@/components/ui/dia-text-reveal";
 import { PromptImproveBar } from "@/components/prompt-improve-panel";
 import { CanvasPromptLibrary } from "./canvas-prompt-library";
@@ -155,12 +155,24 @@ export function CanvasAssistantPanel({ nodes, selectedNodeIds, sessions, activeS
 
     try {
       if (nextMode === "image") {
-        const referenceImages: ReferenceImage[] = await Promise.all(refs.filter((item) => item.dataUrl).map(async (item) => ({ id: item.id, name: `${item.title}.png`, type: "image/png", dataUrl: await imageToDataUrl(item), storageKey: item.storageKey })));
-        const { images } = referenceImages.length ? await requestEdit(token, config, text, referenceImages) : await requestGeneration(token, config, text);
-        const storedImages = await Promise.all(images.map((image) => uploadImage(image.dataUrl)));
+        // 只取 storageKey 发给后端，后端按 owner 校验后从磁盘读图再 multipart 转发上游。
+        // 没 storageKey 的参考（比如刚拖进来还没上传完成的）就忽略，保留 UI 简单。
+        const referenceKeys = refs.map((item) => item.storageKey).filter((key): key is string => Boolean(key));
+        const count = Math.max(1, Math.min(10, Number(config.count) || 1));
+        // 走后端任务化生图：服务端落 running 记录 + worker 跑；前端 await 轮询拿终态。
+        // 即便用户中途切走 / 关画布，credits 也是按真实出图的张数扣的（已成功的不退、worker 不会重复跑）。
+        const { record } = await runAndAwaitGeneration(token, {
+          prompt: text,
+          mode: referenceKeys.length ? "edit" : "image",
+          size: config.size || "",
+          quality: config.quality || "",
+          count,
+          references: referenceKeys,
+        });
+        const keys = (record.thumbnails || []).filter(Boolean);
         updateMessage(session.id, assistantId, {
-          text: `生成了 ${storedImages.length} 张图片`,
-          images: storedImages.map((image, index) => ({ id: images[index].id, dataUrl: image.url, storageKey: image.storageKey, prompt: text })),
+          text: `生成了 ${keys.length} 张图片`,
+          images: keys.map((key, index) => ({ id: `${record.id}-${index}`, dataUrl: imageUrl(key), storageKey: key, prompt: text })),
           isLoading: false,
         });
         return;

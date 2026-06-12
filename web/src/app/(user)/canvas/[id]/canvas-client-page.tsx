@@ -7,8 +7,10 @@ import { useParams } from "next/navigation";
 import { useNav } from "@/lib/use-nav";
 import { Coins, Home, ImageIcon, Images, Keyboard, List, LogOut, Menu, MessageSquare, Plus, Redo2, Settings2, Trash2, Undo2, Upload } from "lucide-react";
 
-import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
-import { resolveImageUrl, uploadImage, type UploadedImage } from "@/services/image-storage";
+import { requestImageQuestion } from "@/services/api/image";
+import { awaitGenerationOnly, runAndAwaitGeneration } from "@/lib/run-and-await-generation";
+import type { RunGenerationPayload } from "@/services/api/generations";
+import { imageUrl, resolveImageUrl, uploadImage, type UploadedImage } from "@/services/image-storage";
 import { useImageUploader } from "@/lib/use-image-uploader";
 import { createId } from "@/lib/id";
 import { readImageMeta } from "@/lib/image-utils";
@@ -1358,6 +1360,71 @@ function InfiniteCanvasPage() {
     setCropNodeId(null);
   }, []);
 
+  // 画布生图统一走后端任务化模式：服务端落 generation 记录 + worker 跑，前端只轮询。
+  // 同一 generationId 不会被重复接管（recoveringGenerationIdsRef 去重）。刷新画布时，
+  // 下面的 useEffect 会扫所有 loading 节点，按 metadata.runningGenerationId 接着轮询，
+  // 不再像老版本那样卡 LOADING 永远不动。
+  const recoveringGenerationIdsRef = useRef<Set<string>>(new Set());
+  const runGenerationForNode = useCallback(async (
+    targetNodeId: string,
+    payload: RunGenerationPayload,
+  ): Promise<{ storageKey: string; width: number; height: number }> => {
+    const result = await runAndAwaitGeneration(token, payload, {
+      onStarted: (record) => {
+        // 把 runningGenerationId 写进 target 节点 —— 刷新页面就能据此续轮询。
+        setNodes((prev) => prev.map((n) => (
+          n.id === targetNodeId
+            ? { ...n, metadata: { ...n.metadata, runningGenerationId: record.id } }
+            : n
+        )));
+        // 同步进 recovering set，避免本会话又被 useEffect 当成"孤儿"再起一份轮询。
+        recoveringGenerationIdsRef.current.add(record.id);
+      },
+    });
+    const meta = await readImageMeta(imageUrl(result.storageKey)).catch(() => ({ width: 0, height: 0 }));
+    return { storageKey: result.storageKey, width: meta.width, height: meta.height };
+  }, [token]);
+
+  // 恢复轮询：每次 nodes 变化都扫一眼有没有「loading 节点 + 已落 runningGenerationId 但还没人接管」，
+  // 给每条起 awaitGenerationOnly。终态时把节点切到 success（图）或 error（文案）。
+  // 用 ref 而非 state 去重，避免 setState → render → effect 又触发的循环。
+  useEffect(() => {
+    if (!token) return;
+    const toRecover = nodes.filter((node) => (
+      node.type === CanvasNodeType.Image
+      && node.metadata?.status === NODE_STATUS_LOADING
+      && node.metadata?.runningGenerationId
+      && !recoveringGenerationIdsRef.current.has(node.metadata.runningGenerationId)
+    ));
+    for (const node of toRecover) {
+      const id = node.metadata!.runningGenerationId!;
+      const targetNodeId = node.id;
+      recoveringGenerationIdsRef.current.add(id);
+      const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+      void awaitGenerationOnly(token, id)
+        .then(async ({ storageKey }) => {
+          const meta = await readImageMeta(imageUrl(storageKey)).catch(() => ({ width: 0, height: 0 }));
+          const size = fitImageNodeSize(meta.width || imageConfig.width, meta.height || imageConfig.height, imageConfig.width, imageConfig.height);
+          setNodes((prev) => prev.map((n) => (
+            n.id === targetNodeId
+              ? { ...n, width: size.width, height: size.height, metadata: { ...n.metadata, ...imageMetadataFromKey(storageKey, meta.width, meta.height) } }
+              : n
+          )));
+        })
+        .catch((error: unknown) => {
+          const msg = error instanceof Error ? error.message : "生成失败";
+          setNodes((prev) => prev.map((n) => (
+            n.id === targetNodeId
+              ? { ...n, metadata: { ...n.metadata, status: NODE_STATUS_ERROR, errorDetails: msg, runningGenerationId: undefined } }
+              : n
+          )));
+        })
+        .finally(() => {
+          recoveringGenerationIdsRef.current.delete(id);
+        });
+    }
+  }, [nodes, token]);
+
   const generateAngleNode = useCallback(async (node: CanvasNodeData, params: CanvasImageAngleParams) => {
     if (!node.metadata?.content) return;
     if (!token) {
@@ -1384,18 +1451,25 @@ function InfiniteCanvasPage() {
     setSelectedNodeIds(new Set([childId]));
     setDialogNodeId(childId);
     try {
-      const { images } = await requestEdit(token, generationConfig, prompt, [{ id: node.id, name: `${node.title || node.id}.png`, type: node.metadata.mimeType || "image/png", dataUrl: node.metadata.content, storageKey: node.metadata.storageKey }]);
-      const image = images[0];
-      const uploaded = await uploadImage(image.dataUrl);
-      const size = fitImageNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
-      setNodes((prev) => prev.map((item) => item.id === childId ? { ...item, width: size.width, height: size.height, metadata: { ...imageMetadata(uploaded), prompt } } : item));
+      // 单参考图 = 父节点本身（必须已落库有 storageKey；没有的就走纯文生图兜底，避免直接报错）。
+      const parentKey = node.metadata.storageKey;
+      const { storageKey, width, height } = await runGenerationForNode(childId, {
+        prompt,
+        mode: parentKey ? "edit" : "image",
+        size: generationConfig.size || "",
+        quality: generationConfig.quality || "",
+        count: 1,
+        references: parentKey ? [parentKey] : [],
+      });
+      const size = fitImageNodeSize(width || imageConfig.width, height || imageConfig.height, imageConfig.width, imageConfig.height);
+      setNodes((prev) => prev.map((item) => item.id === childId ? { ...item, width: size.width, height: size.height, metadata: { ...imageMetadataFromKey(storageKey, width, height), prompt } } : item));
     } catch (error) {
       const errorDetails = error instanceof Error ? error.message : "生成失败";
-      setNodes((prev) => prev.map((item) => item.id === childId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails } } : item));
+      setNodes((prev) => prev.map((item) => item.id === childId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails, runningGenerationId: undefined } } : item));
     } finally {
       setRunningNodeId(null);
     }
-  }, [config, message, token]);
+  }, [config, message, token, runGenerationForNode]);
 
   const handleFontSizeChange = useCallback((nodeId: string, fontSize: number) => {
     setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, fontSize } } : node)));
@@ -1575,22 +1649,28 @@ function InfiniteCanvasPage() {
           setSelectedConnectionId(null);
           setDialogNodeId(nodeId);
 
+          // 每个 target 独立跑后端任务化生图，并发由 runAndAwaitGeneration 各自轮询。
+          // 单条失败不影响其它条；refresh 期间也能由 recovery effect 据节点 runningGenerationId 续上。
+          const referenceKeys = referenceImages.map((ref) => ref.storageKey).filter((key): key is string => Boolean(key));
           let hasSuccess = false;
           await Promise.all(targetIds.map(async (targetId) => {
             try {
-              const { images } = referenceImages.length
-                ? await requestEdit(token, { ...generationConfig, count: "1" }, effectivePrompt, referenceImages)
-                : await requestGeneration(token, { ...generationConfig, count: "1" }, effectivePrompt);
-              const image = images[0];
-              const uploaded = await uploadImage(image.dataUrl);
-              const imageSize = fitImageNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
+              const { storageKey, width, height } = await runGenerationForNode(targetId, {
+                prompt: effectivePrompt,
+                mode: referenceKeys.length ? "edit" : "image",
+                size: generationConfig.size || "",
+                quality: generationConfig.quality || "",
+                count: 1,
+                references: referenceKeys,
+              });
+              const imageSize = fitImageNodeSize(width || imageConfig.width, height || imageConfig.height, imageConfig.width, imageConfig.height);
               setNodes((prev) => {
                 const root = prev.find((node) => node.id === rootId);
                 return prev.map((node) => {
                   if (node.id !== targetId && node.id !== rootId) return node;
                   const center = { x: node.position.x + node.width / 2, y: node.position.y + node.height / 2 };
-                  if (node.id === rootId && (targetId === rootId || !root?.metadata?.primaryImageId)) return { ...node, position: { x: center.x - imageSize.width / 2, y: center.y - imageSize.height / 2 }, width: imageSize.width, height: imageSize.height, metadata: { ...node.metadata, ...imageMetadata(uploaded), primaryImageId: targetId } };
-                  if (node.id === targetId) return { ...node, position: { x: center.x - imageSize.width / 2, y: center.y - imageSize.height / 2 }, width: imageSize.width, height: imageSize.height, metadata: { ...node.metadata, ...imageMetadata(uploaded) } };
+                  if (node.id === rootId && (targetId === rootId || !root?.metadata?.primaryImageId)) return { ...node, position: { x: center.x - imageSize.width / 2, y: center.y - imageSize.height / 2 }, width: imageSize.width, height: imageSize.height, metadata: { ...node.metadata, ...imageMetadataFromKey(storageKey, width, height), primaryImageId: targetId } };
+                  if (node.id === targetId) return { ...node, position: { x: center.x - imageSize.width / 2, y: center.y - imageSize.height / 2 }, width: imageSize.width, height: imageSize.height, metadata: { ...node.metadata, ...imageMetadataFromKey(storageKey, width, height) } };
                   return node;
                 });
               });
@@ -1599,7 +1679,7 @@ function InfiniteCanvasPage() {
               return true;
             } catch (error) {
               const errorDetails = error instanceof Error ? error.message : "生成失败";
-              setNodes((prev) => prev.map((node) => node.id === targetId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails } } : node));
+              setNodes((prev) => prev.map((node) => node.id === targetId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails, runningGenerationId: undefined } } : node));
               return false;
             }
           }));
@@ -1702,28 +1782,32 @@ function InfiniteCanvasPage() {
           return;
         }
 
-        const { images } = context.referenceImages.length
-          ? await requestEdit(token, generationConfig, prompt, context.referenceImages)
-          : await requestGeneration(token, generationConfig, prompt);
-        const image = images[0];
-        const uploadedImage = await uploadImage(image.dataUrl);
+        const referenceKeys = context.referenceImages.map((ref) => ref.storageKey).filter((key): key is string => Boolean(key));
+        const { storageKey, width, height } = await runGenerationForNode(node.id, {
+          prompt,
+          mode: referenceKeys.length ? "edit" : "image",
+          size: generationConfig.size || "",
+          quality: generationConfig.quality || "",
+          count: 1,
+          references: referenceKeys,
+        });
         const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
-        const imageSize = fitImageNodeSize(uploadedImage.width, uploadedImage.height, imageConfig.width, imageConfig.height);
+        const imageSize = fitImageNodeSize(width || imageConfig.width, height || imageConfig.height, imageConfig.width, imageConfig.height);
         setNodes((prev) => prev.map((item) => item.id === node.id ? {
           ...item,
           type: CanvasNodeType.Image,
           width: imageSize.width,
           height: imageSize.height,
-          metadata: { ...item.metadata, ...imageMetadata(uploadedImage), prompt },
+          metadata: { ...item.metadata, ...imageMetadataFromKey(storageKey, width, height), prompt },
         } : item));
       } catch (error) {
         const errorDetails = error instanceof Error ? error.message : "生成失败";
-        setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails } } : item));
+        setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails, runningGenerationId: undefined } } : item));
       } finally {
         setRunningNodeId(null);
       }
     },
-    [config, message, token],
+    [config, message, token, runGenerationForNode],
   );
 
   const generateImageFromTextNode = useCallback((node: CanvasNodeData) => {
@@ -2367,6 +2451,19 @@ function imageExtension(dataUrl: string) {
 
 function imageMetadata(image: UploadedImage): CanvasNodeMetadata {
   return { content: image.url, storageKey: image.storageKey, status: "success", naturalWidth: image.width, naturalHeight: image.height, bytes: image.bytes, mimeType: image.mimeType };
+}
+
+// 后端任务化生图回来时用这个：只有 storageKey + readImageMeta 出来的宽高，没 bytes / mimeType。
+// runningGenerationId 显式清空，避免 spread 进 metadata 时把上一次的 id 留下。
+function imageMetadataFromKey(storageKey: string, width: number, height: number): CanvasNodeMetadata {
+  return {
+    content: imageUrl(storageKey),
+    storageKey,
+    status: "success",
+    naturalWidth: width || undefined,
+    naturalHeight: height || undefined,
+    runningGenerationId: undefined,
+  };
 }
 
 async function hydrateCanvasImages(nodes: CanvasNodeData[]) {

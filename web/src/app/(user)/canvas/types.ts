@@ -40,6 +40,10 @@ export type CanvasNodeMetadata = {
   storageKey?: string;
   mimeType?: string;
   bytes?: number;
+  // 节点正在跑后端任务化生图时关联的那条 generation id（POST /api/generations/run 返回）。
+  // 用于「刷新页面 / 切回画布」后按 id 续轮询，避免 loading 节点永远卡住。
+  // 终态（success / error）时清空。
+  runningGenerationId?: string;
 };
 
 export type CanvasNodeData = {
